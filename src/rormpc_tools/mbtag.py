@@ -39,8 +39,11 @@ def lb_user():
     token = lb_token()
     if not token:
         sys.exit(f"no ListenBrainz user: set lb_user in {settings.CONFIG_FILE} or a token in the listenbrainz-mpd config")
-    return http("https://api.listenbrainz.org/1/validate-token", headers={"Authorization": "Token " + token},
-                strict=True)["user_name"]
+    r = http("https://api.listenbrainz.org/1/validate-token", headers={"Authorization": "Token " + token}, strict=True)
+    if not r.get("valid"):
+        sys.exit(f"ListenBrainz token is not valid ({r.get('message', 'no reason given')}): fix it in the "
+                 "listenbrainz-mpd config, or set lb_user")
+    return r["user_name"]
 
 
 def http(url, data=None, host_interval=1.1, headers=None, strict=False, attempts=5, timeout=30):
