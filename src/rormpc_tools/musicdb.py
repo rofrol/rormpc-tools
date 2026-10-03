@@ -5,9 +5,11 @@
   musicdb import-takeout PATH           # Google Takeout zip/dir/watch-history.json (YouTube + YouTube Music)
   musicdb import-spotify PATH           # Spotify export zip/dir (Streaming_History_Audio_*.json, YourLibrary.json)
   musicdb import-favorites FILE         # text file, one "Artist - Title" per line (e.g. music.txt)
+  musicdb import-local                  # listens ro-listenbrainz-mpd logged locally (counted once with their LB copy)
   musicdb import-skips                  # songs ro-listenbrainz-mpd saw left for another song before their end
   musicdb sync                          # match events to library files and write stickers and the "Skipped" playlist
-  musicdb update                        # deletion retries + import-lb + import-skips + sync + export (hourly, com.rofrol.musicdb)
+  musicdb update                        # deletion retries + import-skips/local + import-lb + sync + export (hourly);
+                                        # a failed import-lb is reported after the rest has run
   musicdb export                        # dump events/favorites as JSONL into the data repo and commit
   musicdb lb-import-spotify [--dry-run]  # send the imported Spotify plays to ListenBrainz (once)
   musicdb lb-playlists [--download]     # ListenBrainz recommendation playlists -> MPD playlists "LB <kind>"
@@ -41,6 +43,9 @@ PLAYLISTS = settings.MPD_PLAYLISTS
 MPD_LOG = settings.MPD_LOG
 LB_CUTOFF = settings.LB_SINCE  # MPD log plays before it, ListenBrainz listens after it
 SKIPS_LOG = settings.SKIPS_LOG
+LISTENS_LOG = settings.LISTENS_LOG
+# import-lb re-reads this much before the newest listen it has: the scrobbler's offline cache submits late
+LB_OVERLAP_S = 7 * 86400
 SKIPPED_MIN = 2  # skips since the last play that put a song into the "Skipped" playlist
 YT_DEDUP_S = 300  # repeated Takeout entries of the same video within 5 min = one play
 YTID_IN_NAME = re.compile(r"--([\w-]{11})--\d{8}\.mp3$")
@@ -172,6 +177,9 @@ def import_lb(_a):
     """Listens since LB_CUTOFF (pages are newest first, so stop at the first older one).
     Any failed or malformed page raises: a silent partial import would look like success."""
     cutoff = dt.datetime.fromisoformat(LB_CUTOFF).timestamp() if LB_CUTOFF else 0
+    newest = db().execute("SELECT max(ts) FROM events WHERE source = 'lb'").fetchone()[0]
+    if newest:  # only what is new since the last import
+        cutoff = max(cutoff, dt.datetime.fromisoformat(newest).timestamp() - LB_OVERLAP_S)
     user = mbtag.lb_user()
     rows, max_ts = [], None
     while True:
@@ -197,6 +205,17 @@ def import_lb(_a):
         if oldest is None or oldest < cutoff or (max_ts is not None and oldest >= max_ts):
             break  # end of history, reached the cutoff, or no progress (max_ts is exclusive)
         max_ts = oldest
+    add_events(rows)
+
+
+def import_local(_a):
+    """Listens logged by ro-listenbrainz-mpd when they count: plays without reading ListenBrainz back. The same
+    listens come back from ListenBrainz with the same timestamp; counted() counts them once."""
+    rows = []
+    for r in jsonl(LISTENS_LOG):
+        y = YTID_IN_NAME.search(r["file"])
+        rows.append(("local", dt.datetime.fromtimestamp(r["ts"]).isoformat(), y.group(1) if y else None,
+                     r.get("mbid"), None, None, None, None, json.dumps({"file": r["file"]})))
     add_events(rows)
 
 
@@ -346,11 +365,27 @@ def match(lib, ytid=None, mbid=None, artist=None, title=None, any_copy=False):
     return None, None
 
 
+def library_files(lib):
+    return set(lib[0].values()) | set(lib[1].values()) | {f for fs in lib[2].values() for f in fs}
+
+
+def event_file(lib, files, src, ytid, mbid, artist, title, extra):
+    """Library file of a play: the scrobbler's local log names it, other sources are matched."""
+    if src == "local" and (f := json.loads(extra or "{}").get("file")) in files:
+        return f
+    return match(lib, ytid, mbid, artist, title)[0]
+
+
 def counted(c, lib):
     """{file: (count, last_ts)}, {file: favorite}, unmatched play keys, unmatched favorites."""
     plays, last, unmatched = collections.Counter(), {}, collections.Counter()
-    for src, ts, ytid, mbid, uri, artist, title in c.execute("SELECT source, ts, ytid, mbid, spotify_uri, artist, title FROM events"):
-        f, _ = match(lib, ytid, mbid, artist, title)
+    files = library_files(lib)
+    local = {ts for (ts,) in c.execute("SELECT ts FROM events WHERE source = 'local'")}
+    for src, ts, ytid, mbid, uri, artist, title, extra in c.execute(
+            "SELECT source, ts, ytid, mbid, spotify_uri, artist, title, extra FROM events"):
+        if src == "lb" and ts in local:
+            continue  # the scrobbler's own listen, already counted from its local log
+        f = event_file(lib, files, src, ytid, mbid, artist, title, extra)
         if src == "yt" and not f:
             continue  # plain YouTube watches that are not in the library are mostly not music
         if f:
@@ -374,7 +409,7 @@ LIKE_TO_LB = {"2": 1, "1": 0, "0": -1}  # rmpc like sticker -> LB feedback score
 def sync(_a):
     c, lib, m = db(), library(), mpd()
     plays, last, favs, _, _ = counted(c, lib)
-    files = set(lib[0].values()) | set(lib[1].values()) | {f for fs in lib[2].values() for f in fs}
+    files = library_files(lib)
     skips = skipped(c, last)
     mbid_of = {f: mbid for mbid, f in lib[1].items()}
     n, likes = 0, collections.defaultdict(list)
@@ -428,10 +463,19 @@ def push_feedback(c, scores):
 def update(a):
     deletions(argparse.Namespace(retry=True, json=False))
     import_skips(a)  # local: before the network steps that can fail
-    import_lb(a)
+    import_local(a)
+    try:
+        import_lb(a)
+    except Exception as e:  # ListenBrainz down or slow: the local log still keeps the counts current
+        lb_failed = e
+        print(f"import-lb failed: {e}", file=sys.stderr)
+    else:
+        lb_failed = None
     sync(a)
     lb_playlists(argparse.Namespace(user=None, n=0, download=False, all=False))
     export(a)
+    if lb_failed:
+        raise lb_failed
 
 
 PERIODIC = {"daily-jams", "weekly-jams", "weekly-exploration"}
@@ -527,11 +571,19 @@ def journal_lock():
 
 def describe(rel, rows, lib, m):
     """What deleting rel touches: its plays (all sources), recording MBID and video id."""
+    files = library_files(lib)
     info = (m.find("file", rel) or [{}])[0]
     y = YTID_IN_NAME.search(rel)
     return {"file": rel, "artist": one(info.get("artist", "")), "title": one(info.get("title", pathlib.Path(rel).stem)),
             "ytid": y.group(1) if y else None, "mbid": next((x for x, f in lib[1].items() if f == rel), None),
-            "events": [dict(zip(EVENT_COLS, r)) for r in rows if match(lib, r[2], r[3], r[5], r[6])[0] == rel]}
+            "events": [dict(zip(EVENT_COLS, r)) for r in rows
+                       if event_file(lib, files, r[0], r[2], r[3], r[5], r[6], r[8]) == rel]}
+
+
+def plays_of(events):
+    """Plays among a song's events: a ListenBrainz listen with the timestamp of a local one is the same play."""
+    local = {e["ts"] for e in events if e["source"] == "local"}
+    return sum(1 for e in events if not (e["source"] == "lb" and e["ts"] in local))
 
 
 def lb_listens(r):
@@ -571,7 +623,7 @@ def delete(a):
         for rel in files:
             d = describe(rel, rows, lib, m)
             x = {k: d[k] for k in ("file", "artist", "title", "ytid")} | {
-                "exists": (MUSIC / rel).exists(), "plays": len(d["events"]), "lb_listens": len(lb_listens(d)),
+                "exists": (MUSIC / rel).exists(), "plays": plays_of(d["events"]), "lb_listens": len(lb_listens(d)),
                 "shared": other_copies(d["mbid"], rel)}
             if a.youtube:
                 x["youtube"] = youtube_playlists(d["ytid"])
@@ -818,6 +870,7 @@ def main():
     p = sp.add_parser("import-takeout"); p.add_argument("path"); p.set_defaults(fn=import_takeout)
     p = sp.add_parser("import-spotify"); p.add_argument("path"); p.set_defaults(fn=import_spotify)
     p = sp.add_parser("import-favorites"); p.add_argument("file"); p.set_defaults(fn=import_favorites)
+    sp.add_parser("import-local").set_defaults(fn=import_local)
     sp.add_parser("import-skips").set_defaults(fn=import_skips)
     sp.add_parser("sync").set_defaults(fn=sync)
     sp.add_parser("update").set_defaults(fn=update)

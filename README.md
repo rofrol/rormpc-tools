@@ -13,7 +13,7 @@ They work from the shell too; each one's usage is in its `--help`.
 
 ## Install
 
-    uv tool install 'rormpc-tools @ git+https://github.com/rofrol/rormpc-tools@v0.1.2'
+    uv tool install 'rormpc-tools @ git+https://github.com/rofrol/rormpc-tools@v0.1.3'
 
 rormpc's `scripts/rormpc_install.sh companions` installs the pinned version and runs `musicdb update` hourly
 (and the scrobbler and `mpd-gap`) as launchd agents or systemd user units. For a checkout:
@@ -54,5 +54,10 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
 - Likes: rmpc's `like` sticker is the source of truth; only changes go to ListenBrainz, and a song without a like
   sticker never clears LB feedback.
 - Skips stay local: nothing about them is sent to ListenBrainz.
+- Plays of MPD songs come from ro-listenbrainz-mpd's local `listens.jsonl`, so counts stay current when
+  ListenBrainz is down. The same listen imported back from ListenBrainz has the same timestamp and is counted
+  once; it is kept because deleting the history needs its msid. `import-lb` reads only what is new (7 days of
+  overlap for listens the scrobbler's offline cache submits late), and a failed `import-lb` no longer stops
+  `update` from syncing.
 - Personal data (play history, exports, OAuth secrets, account names) never goes into this repository: it is
   public. Paths and accounts come from the settings, with defaults that assume nothing about the user.

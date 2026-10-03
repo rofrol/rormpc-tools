@@ -1,6 +1,6 @@
 [project]
 name = "rormpc-tools"
-version = "0.1.2"
+version = "0.1.3"
 description = "MPD music tools behind rormpc's Hits pane, play counts and delete menu: hits, musicdb, mpd-gap, yt-mp3-mb, yt-playlist"
 readme = "README.md"
 license = "BSD-3-Clause"

@@ -37,9 +37,10 @@ SECRETS_DIR = _path("secrets_dir", "MUSICDB_SECRETS", XDG_DATA / "rormpc-tools/s
 LB_USER = _get("lb_user", "LB_USER", None)
 # when the scrobbler started: MPD log plays before it, ListenBrainz listens after it; empty: ListenBrainz only
 LB_SINCE = _get("lb_since", "LB_CUTOFF", None)
-# skipped songs written by ro-listenbrainz-mpd
-SKIPS_LOG = _path("skips_log", "MUSICDB_SKIPS",
-                  (HOME / "Library/Application Support" if sys.platform == "darwin" else XDG_DATA)
-                  / "listenbrainz-mpd/skips.jsonl")
+# listens and skipped songs logged by ro-listenbrainz-mpd, next to its submission cache
+SCROBBLER_DIR = _path("scrobbler_dir", "MUSICDB_SCROBBLER_DIR",
+                      (HOME / "Library/Application Support" if sys.platform == "darwin" else XDG_DATA) / "listenbrainz-mpd")
+LISTENS_LOG = SCROBBLER_DIR / "listens.jsonl"
+SKIPS_LOG = SCROBBLER_DIR / "skips.jsonl"
 # contact in the User-Agent that MusicBrainz asks for: an e-mail or URL
 CONTACT = _get("contact", "RORMPC_TOOLS_CONTACT", "https://github.com/rofrol/rormpc-tools")
