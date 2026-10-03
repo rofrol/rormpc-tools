@@ -30,7 +30,7 @@ Source of truth: JSONL in data_dir (settings; committed when it is a git reposit
 db_file is a cache rebuilt from it when missing.
 Needs sticker_file in mpd.conf.
 """
-import argparse, collections, contextlib, datetime as dt, fcntl, json, os, pathlib, re, sqlite3, subprocess, sys, time, urllib.request, zipfile
+import argparse, collections, contextlib, datetime as dt, fcntl, json, os, pathlib, re, shutil, sqlite3, subprocess, sys, time, urllib.request, zipfile
 
 from . import mbtag, settings
 
@@ -615,14 +615,14 @@ def delete(a):
         if r["history"] == "delete":
             finish(r)
     errors = settle(recs)
-    verb = "Deleted" if a.permanent else "Trashed"
-    if errors:
-        notify(f"{verb}: {', '.join(names)[:120]}", f"FAILED, retried hourly: {'; '.join(errors)[:150]}")
-    else:
-        notify(f"{verb}: {', '.join(names)[:150]}",
-               ("history deleted" if a.listenbrainz else "history kept") + ("" if a.permanent else "; Ctrl-y undoes"))
     if a.listenbrainz:
         export(argparse.Namespace())
+    # the last line is what rormpc shows in its status bar (stdout on success, stderr on failure)
+    summary = f"{'Deleted' if a.permanent else 'Trashed'}: {', '.join(names)}"
+    if errors:
+        notify(summary[:120], f"FAILED, retried hourly: {'; '.join(errors)[:150]}")
+        sys.exit(f"{summary}; failed, retried hourly: {'; '.join(errors)}")
+    print(summary + ("; history deleted" if a.listenbrainz else "") + ("" if a.permanent else " (Ctrl-y undoes)"))
 
 
 def finish(r):
@@ -693,9 +693,23 @@ def settle(recs):
 
 
 def notify(text, subtitle=""):
-    """macOS notification: rmpc runs ExternalCommand in the background, so this is the only visible feedback."""
-    q = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')
-    subprocess.run(["osascript", "-e", f'display notification "{q(text)}" with title "musicdb" subtitle "{q(subtitle)}"'])
+    """Best-effort desktop notification, only for failures (rormpc shows successes in its status bar):
+    terminal-notifier, else osascript on macOS; notify-send on Linux; nothing when none is installed.
+    It never raises: a missing notifier must not fail work that is already done."""
+    try:
+        if sys.platform == "darwin":
+            if shutil.which("terminal-notifier"):
+                cmd = ["terminal-notifier", "-title", "musicdb", "-subtitle", subtitle, "-message", text]
+            else:
+                q = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')
+                cmd = ["osascript", "-e", f'display notification "{q(text)}" with title "musicdb" subtitle "{q(subtitle)}"']
+        elif shutil.which("notify-send"):
+            cmd = ["notify-send", "musicdb", f"{text}\n{subtitle}".strip()]
+        else:
+            return
+        subprocess.run(cmd, capture_output=True, timeout=10)  # deadline: a hung notifier must not block the job
+    except Exception:
+        pass
 
 
 def undo(_a):
@@ -706,11 +720,11 @@ def undo(_a):
         trashed = [r for r in pending if r.get("mode", "trash") == "trash" and r.get("trashed_to")
                    and pathlib.Path(r["trashed_to"]).exists()]
         if not trashed:
-            notify("Nothing to undo"); print("nothing to undo"); return
+            sys.exit("Nothing to undo")
         r = max(trashed, key=lambda r: r["queued_at"])
         dst = MUSIC / r["file"]
         if dst.exists():
-            notify(f"Not restored: {r['file']} exists again"); sys.exit(f"{dst} exists, not overwriting")
+            sys.exit(f"Not restored: {r['file']} exists again")
         pathlib.Path(r["trashed_to"]).rename(dst)
         write_jsonl(PENDING, [x for x in pending if x is not r])
     subprocess.run(["mpc", "-q", "update", "--wait"])
@@ -718,8 +732,7 @@ def undo(_a):
     for k, v in (r.get("stickers") or {}).items():
         m.sticker_set("song", r["file"], k, v)
     kept = r.get("history") != "delete"
-    notify(f"Restored: {r['file'].rsplit('/', 1)[-1]}", "" if kept else "its deleted listens stay deleted")
-    print(f"restored {r['file']}")
+    print(f"Restored: {r['file'].rsplit('/', 1)[-1]}" + ("" if kept else " (its deleted listens stay deleted)"))
 
 
 def other_copies(mbid, rel):
@@ -748,11 +761,20 @@ def deletions(a):
             return
         for r in failed:
             finish(r)
-        errors = settle(failed)
+        settle(failed)
         for r in failed:
             print(f"{r['file']}: " + ", ".join(f"{k} {v}" for k, v in r["ops"].items()))
-        if not errors:
-            notify(f"Deletion cleanup finished: {len(failed)} songs")
+        # notify once per new error, not every hour while e.g. the YouTube login stays expired
+        fresh = [r for r in failed if r.get("error") and r.get("notified_error") != r["error"]]
+        if fresh:
+            notify(f"Deletion cleanup failed for {len(fresh)} songs", "; ".join(r["error"] for r in fresh)[:150])
+            with journal_lock():
+                pending = jsonl(PENDING)
+                errs = {r["id"]: r["error"] for r in fresh}
+                for p in pending:
+                    if p["id"] in errs:
+                        p["notified_error"] = errs[p["id"]]
+                write_jsonl(PENDING, pending)
         export(argparse.Namespace())
         return
     rows = [{"id": r["id"], "file": r["file"], "mode": r.get("mode", "trash"), "history": r.get("history", "keep"),
