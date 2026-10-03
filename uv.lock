@@ -569,27 +569,22 @@ wheels = [
 
 [[package]]
 name = "rormpc-tools"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
-    { name = "mutagen" },
-    { name = "python-mpd2" },
-]
-
-[package.optional-dependencies]
-youtube = [
     { name = "google-api-python-client" },
     { name = "google-auth-oauthlib" },
+    { name = "mutagen" },
+    { name = "python-mpd2" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "google-api-python-client", marker = "extra == 'youtube'" },
-    { name = "google-auth-oauthlib", marker = "extra == 'youtube'" },
+    { name = "google-api-python-client" },
+    { name = "google-auth-oauthlib" },
     { name = "mutagen" },
     { name = "python-mpd2" },
 ]
-provides-extras = ["youtube"]
 
 [[package]]
 name = "typing-extensions"

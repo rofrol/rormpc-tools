@@ -13,8 +13,7 @@ They work from the shell too; each one's usage is in its `--help`.
 
 ## Install
 
-    uv tool install 'rormpc-tools @ git+https://github.com/rofrol/rormpc-tools@v0.1.0'
-    uv tool install 'rormpc-tools[youtube] @ git+https://github.com/rofrol/rormpc-tools@v0.1.0'   # with yt-playlist
+    uv tool install 'rormpc-tools @ git+https://github.com/rofrol/rormpc-tools@v0.1.1'
 
 rormpc's `scripts/rormpc_install.sh companions` installs the pinned version and runs `musicdb update` hourly
 (and the scrobbler and `mpd-gap`) as launchd agents or systemd user units. For a checkout:
@@ -23,6 +22,19 @@ rormpc's `scripts/rormpc_install.sh companions` installs the pinned version and 
 Needs MPD with `sticker_file` set (stickers hold the counts), `mpc`; `yt-mp3-mb` needs `yt-dlp` and `ffmpeg`,
 `fpcalc` (AcoustID) is optional. ListenBrainz features read the token from the
 [listenbrainz-mpd](https://codeberg.org/elomatreb/listenbrainz-mpd) config (or `$LISTENBRAINZ_TOKEN`).
+
+### YouTube playlists (optional)
+
+When rormpc's delete menu deletes a song's history, `musicdb` can also remove the video from your YouTube
+playlists. It is off until you set it up once (`yt-playlist --help` has the details):
+
+1. In Google Cloud, a project with "YouTube Data API v3" enabled, an OAuth consent screen in "Testing" with
+   yourself as a test user, and an OAuth client of type "Desktop app"; save its JSON as `youtube-client.json`
+   in `secrets_dir` (see the settings).
+2. `yt-playlist auth` (opens the browser), then `yt-playlist list` and `yt-playlist use ID ...` to choose the
+   music playlists to clean up.
+
+A "Testing" app's login expires after 7 days; the next run from a terminal logs in again.
 
 ## Settings
 
