@@ -461,21 +461,25 @@ def push_feedback(c, scores):
 
 
 def update(a):
+    """Every step runs even when ListenBrainz is down; failed network steps are reported at the end."""
+    failed = []
+
+    def network(step, *args):
+        try:
+            step(*args)
+        except Exception as e:  # ListenBrainz down or slow: the local log still keeps the counts current
+            failed.append(f"{step.__name__}: {e}")
+            print(f"{step.__name__} failed: {e}", file=sys.stderr)
+
     deletions(argparse.Namespace(retry=True, json=False))
-    import_skips(a)  # local: before the network steps that can fail
+    import_skips(a)
     import_local(a)
-    try:
-        import_lb(a)
-    except Exception as e:  # ListenBrainz down or slow: the local log still keeps the counts current
-        lb_failed = e
-        print(f"import-lb failed: {e}", file=sys.stderr)
-    else:
-        lb_failed = None
+    network(import_lb, a)
     sync(a)
-    lb_playlists(argparse.Namespace(user=None, n=0, download=False, all=False))
+    network(lb_playlists, argparse.Namespace(user=None, n=0, download=False, all=False))
     export(a)
-    if lb_failed:
-        raise lb_failed
+    if failed:
+        sys.exit("failed: " + "; ".join(failed))
 
 
 PERIODIC = {"daily-jams", "weekly-jams", "weekly-exploration"}
