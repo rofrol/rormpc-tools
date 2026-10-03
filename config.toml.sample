@@ -1,0 +1,24 @@
+# rormpc-tools settings: copy to ~/.config/rormpc-tools/config.toml (or point $RORMPC_TOOLS_CONFIG at it).
+# Every key is optional; the environment variable in brackets wins over the file.
+
+# MPD's music_directory: where yt-mp3-mb saves and musicdb deletes files [YTMB_MUSIC_DIR]
+#music_dir = "~/Music"
+# MPD's playlist_directory and log_file [MPD_PLAYLISTS, MPD_LOG]
+#mpd_playlists = "~/.config/mpd/playlists"
+#mpd_log = "~/.config/mpd/log"
+
+# Play history as JSONL, the source of truth. If it is a git repository, musicdb commits (and pushes) it. [MUSICDB_DATA]
+#data_dir = "~/.local/share/rormpc-tools/data"
+# SQLite cache rebuilt from data_dir when missing [MUSICDB]
+#db_file = "~/.local/share/rormpc-tools/plays.db"
+# yt-playlist's OAuth client and token [MUSICDB_SECRETS]
+#secrets_dir = "~/.local/share/rormpc-tools/secrets"
+
+# ListenBrainz user whose listens musicdb imports; empty: the owner of the token in the listenbrainz-mpd config [LB_USER]
+#lb_user = ""
+# When your scrobbler started (local time): plays from the MPD log before it, ListenBrainz listens after it.
+# Empty: ListenBrainz only, and `musicdb import-mpdlog` refuses to run. [LB_CUTOFF]
+#lb_since = "2026-01-01T00:00:00"
+
+# Contact in the User-Agent that MusicBrainz asks for: your e-mail or a URL [RORMPC_TOOLS_CONTACT]
+#contact = "https://github.com/rofrol/rormpc-tools"

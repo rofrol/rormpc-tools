@@ -1,0 +1,23 @@
+[project]
+name = "rormpc-tools"
+version = "0.1.0"
+description = "MPD music tools behind rormpc's Hits pane, play counts and delete menu: hits, musicdb, mpd-gap, yt-mp3-mb, yt-playlist"
+readme = "README.md"
+license = "BSD-3-Clause"
+requires-python = ">=3.11"
+dependencies = ["python-mpd2", "mutagen"]
+
+[project.optional-dependencies]
+# yt-playlist: remove deleted songs from your YouTube playlists (OAuth)
+youtube = ["google-auth-oauthlib", "google-api-python-client"]
+
+[project.scripts]
+hits = "rormpc_tools.hits:main"
+musicdb = "rormpc_tools.musicdb:main"
+mpd-gap = "rormpc_tools.mpd_gap:main"
+yt-mp3-mb = "rormpc_tools.yt_mp3_mb:main"
+yt-playlist = "rormpc_tools.yt_playlist:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
