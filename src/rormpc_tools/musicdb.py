@@ -467,7 +467,7 @@ def update(a):
     def network(step, *args):
         try:
             step(*args)
-        except Exception as e:  # ListenBrainz down or slow: the local log still keeps the counts current
+        except (Exception, SystemExit) as e:  # ListenBrainz down, slow or a bad token: the local log still counts
             failed.append(f"{step.__name__}: {e}")
             print(f"{step.__name__} failed: {e}", file=sys.stderr)
 
