@@ -13,7 +13,7 @@ They work from the shell too; each one's usage is in its `--help`.
 
 ## Install
 
-    uv tool install 'rormpc-tools @ git+https://github.com/rofrol/rormpc-tools@v0.1.3'
+    uv tool install 'rormpc-tools @ git+https://github.com/rofrol/rormpc-tools@v0.1.4'
 
 rormpc's `scripts/rormpc_install.sh companions` installs the pinned version and runs `musicdb update` hourly
 (and the scrobbler and `mpd-gap`) as launchd agents or systemd user units. For a checkout:
