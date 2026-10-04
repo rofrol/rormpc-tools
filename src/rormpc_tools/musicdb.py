@@ -17,7 +17,8 @@
                                         # also deletes the history (LB listens: irreversible, YouTube playlists)
   musicdb delete --preview [--youtube] [FILE...]  # JSON: plays, LB listens, YouTube playlists; changes nothing
   musicdb undo                          # rmpc key: restore the most recently trashed song (repeatable)
-  musicdb deletions [--json] [--retry]  # the deletion journal; --retry runs failed remote steps (update does it)
+  musicdb deletions [--json [--all]] [--retry]  # the deletion journal (--all adds finished permanent deletions);
+                                                # --retry runs failed remote steps (update does it)
   musicdb top [-n 30]                   # most played library songs
   musicdb skips [-n 30]                 # songs skipped most since their last play
   musicdb missing [-n 50]               # played / liked songs that are not in the library (yt-mp3-mb candidates)
@@ -652,6 +653,7 @@ def delete(a):
             rec = {"id": rid, "file": rel, "mode": "permanent" if a.permanent else "trash",
                    "trashed_to": None if a.permanent else str(pathlib.Path.home() / ".Trash" / rid),
                    "history": "delete" if a.listenbrainz else "keep", "ytid": d["ytid"], "mbid": d["mbid"],
+                   "artist": d["artist"], "title": d["title"],
                    "queued_at": dt.datetime.now().isoformat(timespec="seconds"), "stickers": stickers,
                    "events": d["events"]}
             pending.append(rec)
@@ -768,13 +770,17 @@ def notify(text, subtitle=""):
         pass
 
 
-def undo(_a):
-    """Restore the most recently trashed song (repeat to go further back) with its stickers. Deleted listens
-    and playlist entries stay deleted."""
+def undo(a):
+    """Restore the most recently trashed song (repeat to go further back), or the one with --id, with its
+    stickers. Deleted listens and playlist entries stay deleted."""
     with journal_lock():
         pending = jsonl(PENDING)
         trashed = [r for r in pending if r.get("mode", "trash") == "trash" and r.get("trashed_to")
                    and pathlib.Path(r["trashed_to"]).exists()]
+        if getattr(a, "id", None):
+            trashed = [r for r in trashed if r["id"] == a.id]
+            if not trashed:
+                sys.exit(f"Not in the Trash any more: {a.id}")
         if not trashed:
             sys.exit("Nothing to undo")
         r = max(trashed, key=lambda r: r["queued_at"])
@@ -835,12 +841,36 @@ def deletions(a):
         return
     rows = [{"id": r["id"], "file": r["file"], "mode": r.get("mode", "trash"), "history": r.get("history", "keep"),
              "queued_at": r["queued_at"], "ops": r.get("ops", {}), "error": r.get("error")} for r in jsonl(PENDING)]
+    if a.json and getattr(a, "all", False):
+        print(json.dumps([journal_row(r) for r in jsonl(PENDING) + jsonl(DONE)], ensure_ascii=False)); return
     if a.json:
         print(json.dumps(rows, ensure_ascii=False)); return
     for x in rows:
         print(f"{x['queued_at']}  {x['mode']:9} history {x['history']:6} {x['file']}"
               + (f"\n   {', '.join(f'{k} {v}' for k, v in x['ops'].items())}" if x["ops"] else "")
               + (f"\n   ERROR {x['error']}" if x["error"] else ""))
+
+
+def name_title(rel):
+    """The video title in a downloaded file name (NNN--Channel--Title--ytid--YYYYMMDD.mp3), else the stem."""
+    parts = pathlib.Path(rel).stem.split("--")
+    if YTID_IN_NAME.search(pathlib.Path(rel).name) and len(parts) >= 4:
+        return "--".join(parts[2:-2] or parts[1:-2]).replace("_", " ")
+    return pathlib.Path(rel).stem
+
+
+def journal_row(r):
+    """One deleted song for rormpc's Deleted pane. Older records have no artist/title: take them from a play, else
+    the file name. `restorable`: the file is still in the Trash (Ctrl-y / `undo --id`)."""
+    first = (r.get("events") or [{}])[0]
+    trashed = r.get("trashed_to")
+    return {"id": r["id"], "file": r["file"], "artist": r.get("artist") or first.get("artist") or "",
+            "title": r.get("title") or first.get("title") or name_title(r["file"]),
+            "mode": r.get("mode", "trash"), "history": r.get("history", "keep"), "deleted_at": r["queued_at"],
+            "finished_at": r.get("finished_at"), "restorable": bool(trashed and pathlib.Path(trashed).exists()),
+            "plays": plays_of(r.get("events") or []), "lb_listens": len(lb_listens(r)),
+            "lb_deleted": len(r.get("lb_deleted") or []), "youtube_removed": r.get("youtube_removed") or [],
+            "ytid": r.get("ytid"), "ops": r.get("ops", {}), "error": r.get("error")}
 
 
 def top(a):
@@ -889,9 +919,12 @@ def main():
     p.add_argument("--preview", action="store_true", help="print what would be touched (JSON), change nothing")
     p.add_argument("--youtube", action="store_true", help="with --preview: look the video up in your YouTube playlists")
     p.set_defaults(fn=delete)
-    sp.add_parser("undo").set_defaults(fn=undo)
+    p = sp.add_parser("undo"); p.add_argument("--id", help="a journal id (musicdb deletions --json)")
+    p.set_defaults(fn=undo)
     p = sp.add_parser("deletions"); p.add_argument("--retry", action="store_true")
-    p.add_argument("--json", action="store_true"); p.set_defaults(fn=deletions)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--all", action="store_true", help="with --json: also finished permanent deletions")
+    p.set_defaults(fn=deletions)
     p = sp.add_parser("top"); p.add_argument("-n", type=int, default=30); p.set_defaults(fn=top)
     p = sp.add_parser("skips"); p.add_argument("-n", type=int, default=30); p.set_defaults(fn=skips_cmd)
     p = sp.add_parser("missing"); p.add_argument("-n", type=int, default=50); p.set_defaults(fn=missing)
