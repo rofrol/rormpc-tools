@@ -17,6 +17,7 @@
                                         # also deletes the history (LB listens: irreversible, YouTube playlists)
   musicdb delete --preview [--youtube] [FILE...]  # JSON: plays, LB listens, YouTube playlists; changes nothing
   musicdb undo                          # rmpc key: restore the most recently trashed song (repeatable)
+  musicdb keep|unkeep [FILE...]         # not a deletion candidate: drop it from the "Not finished" playlist
   musicdb tag add|remove|list|of ...   # hand-made lists (God, melancholic, ...); musicdb tag --help
   musicdb genre add|exclude|reset GENRE --current   # correct a song's MusicBrainz genres
   musicdb chart [--bucket month] [--open]  # HTML page: how my most played songs rose and fell
@@ -106,7 +107,8 @@ def export(_a):
             json.dumps({k: v for k, v in zip(cols, r) if v not in ("", None)}, ensure_ascii=False) + "\n" for r in rows))
     git = lambda *a: subprocess.run(["git", "-C", str(DATA), *a], capture_output=True, text=True)
     # the hand-written logs (tag lists, manual genres, hidden hits) are committed with the hourly export
-    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl") if (DATA / f).exists()]
+    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl")
+            if (DATA / f).exists()]
     git("add", "events.jsonl", "favorites.jsonl", "tombstones.jsonl", "skips.jsonl", "deletions", *logs)
     if git("diff", "--cached", "--quiet").returncode:
         n = git("diff", "--cached", "--numstat").stdout.split()[:1]
@@ -252,6 +254,65 @@ def write_skipped_playlist(skips):
     tmp.write_text("".join(f + "\n" for f in files))
     tmp.replace(PLAYLISTS / "Skipped.m3u")  # atomic: MPD never reads a half-written playlist
     return len(files)
+
+
+NF_DAYS, NF_MIN_S, NF_VISITS, NF_DAYS_SEEN, NF_RATIO = 180, 90, 4, 3, 0.2
+NF_KEEP = DATA / "not-finished-keep.jsonl"
+
+
+def not_finished(c, durations):
+    """{file: reason} of deletion candidates: songs I rarely play to the end (TODO, consulted 2026-10-03).
+    A visit is a counted listen (90 % without a seek, the scrobbler's local log) or a skip; in the last NF_DAYS days
+    a song needs NF_VISITS visits on NF_DAYS_SEEN days, at most NF_RATIO of them finished, and most skips before half
+    of the song without a seek. Songs shorter than NF_MIN_S (intros, skits) and never-played songs are no data.
+    Likes and "keep" decisions are applied by the caller."""
+    since = (dt.datetime.now() - dt.timedelta(days=NF_DAYS)).isoformat()
+    done, skips = collections.defaultdict(list), collections.defaultdict(list)
+    for ts, extra in c.execute("SELECT ts, extra FROM events WHERE source = 'local' AND ts >= ?", (since,)):
+        f = json.loads(extra or "{}").get("file")
+        if f:
+            done[f].append(ts)
+    for ts, f, pos, dur, run in c.execute("SELECT ts, file, position_s, duration_s, run_s FROM skips WHERE ts >= ?", (since,)):
+        skips[f].append((ts, pos or 0, dur or durations.get(f, 0), run or 0))
+    out = {}
+    for f in set(done) | set(skips):
+        dur = durations.get(f) or max((d for _, _, d, _ in skips[f]), default=0)
+        visits = len(done[f]) + len(skips[f])
+        days = {t[:10] for t in done[f]} | {t[:10] for t, *_ in skips[f]}
+        if dur < NF_MIN_S or visits < NF_VISITS or len(days) < NF_DAYS_SEEN or len(done[f]) / visits > NF_RATIO:
+            continue
+        seeked = sum(1 for _, pos, _, run in skips[f] if pos - run > 5)  # jumped ahead: a favourite part, not dislike
+        early = sum(1 for _, pos, d, run in skips[f] if pos - run <= 5 and pos < 0.5 * (d or dur))
+        if early * 2 < len(skips[f]):
+            continue
+        out[f] = f"{len(done[f])}/{visits} finished · {early} early exits" + (f" · {seeked} seek-heavy" if seeked else "")
+    return out
+
+
+def kept():
+    """Files I marked "keep" (not a deletion candidate) with `musicdb keep`; "unkeep" revokes."""
+    state = {}
+    for e in jsonl(NF_KEEP):
+        state[e["file"]] = e["action"] == "keep"
+    return {f for f, k in state.items() if k}
+
+
+def keep_cmd(a):
+    files = a.files or [subprocess.run(["mpc", "-f", "%file%", "current"], capture_output=True, text=True).stdout.strip()]
+    if not all(files):
+        sys.exit("nothing is playing")
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    with open(NF_KEEP, "a") as fh:
+        for f in files:
+            fh.write(json.dumps({"ts": now, "action": a.cmd, "file": f}, ensure_ascii=False) + "\n")
+    print(f"{a.cmd}: {', '.join(files)} (the Not finished playlist follows on the next sync)")
+
+
+def write_playlist(name, files):
+    PLAYLISTS.mkdir(parents=True, exist_ok=True)
+    tmp = PLAYLISTS / f".{name}.m3u.tmp"
+    tmp.write_text("".join(f + "\n" for f in files))
+    tmp.replace(PLAYLISTS / f"{name}.m3u")  # atomic: MPD never reads a half-written playlist
 
 
 def open_export(path, pattern):
@@ -418,12 +479,14 @@ def sync(_a):
     plays, last, favs, _, _ = counted(c, lib)
     files = library_files(lib)
     skips = skipped(c, last)
+    durations = {s["file"]: float(one(s.get("duration", 0)) or 0) for s in m.listallinfo() if s.get("file")}
+    unfinished, keep, candidates = not_finished(c, durations), kept(), []
     mbid_of = {f: mbid for mbid, f in lib[1].items()}
     n, likes = 0, collections.defaultdict(list)
     for f in files:
         k = plays.get(f, 0)
         want = {"playCount": str(k), "plays": f"{k:5d}" if k else "", "lastPlayed": last.get(f, "")[:10],
-                "skips": f"{skips[f]:5d}" if skips[f] else ""}
+                "skips": f"{skips[f]:5d}" if skips[f] else "", "notFinished": ""}
         try:
             have = m.sticker_list("song", f)
         except Exception:  # MPD errors when a song has no stickers yet
@@ -437,6 +500,9 @@ def sync(_a):
             n += 1
         if like in LIKE_TO_LB and f in mbid_of:
             likes[mbid_of[f]].append(LIKE_TO_LB[like])
+        if f in unfinished and like != "2" and f not in keep:
+            want["notFinished"] = unfinished[f]
+            candidates.append(f)
         for key, val in want.items():
             if have.get(key, "") == val:
                 continue
@@ -448,7 +514,9 @@ def sync(_a):
     sent = push_feedback(c, {mbid: max(scores) for mbid, scores in likes.items()})  # duplicates: a like wins
     print(f"{len(files)} songs, {sum(1 for f in files if plays.get(f))} with plays, "
           f"{sum(1 for v in likes.values() if max(v) == 1)} liked, {n} sticker updates, {sent} LB feedback sent, "
-          f"{write_skipped_playlist(collections.Counter({f: k for f, k in skips.items() if f in files}))} in playlist Skipped")
+          f"{write_skipped_playlist(collections.Counter({f: k for f, k in skips.items() if f in files}))} in playlist Skipped, "
+          f"{len(candidates)} in Not finished")
+    write_playlist("Not finished", candidates)
 
 
 def push_feedback(c, scores):
@@ -936,6 +1004,9 @@ def main():
     p.set_defaults(fn=delete)
     p = sp.add_parser("undo"); p.add_argument("--id", help="a journal id (musicdb deletions --json)")
     p.set_defaults(fn=undo)
+    for verb in ("keep", "unkeep"):
+        p = sp.add_parser(verb, help="(un)mark songs as not deletion candidates (Not finished)")
+        p.add_argument("files", nargs="*"); p.set_defaults(fn=keep_cmd, cmd=verb)
     p = sp.add_parser("deletions"); p.add_argument("--retry", action="store_true")
     p.add_argument("--json", action="store_true")
     p.add_argument("--all", action="store_true", help="with --json: also finished permanent deletions")
