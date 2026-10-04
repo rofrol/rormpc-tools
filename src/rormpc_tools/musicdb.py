@@ -17,6 +17,7 @@
                                         # also deletes the history (LB listens: irreversible, YouTube playlists)
   musicdb delete --preview [--youtube] [FILE...]  # JSON: plays, LB listens, YouTube playlists; changes nothing
   musicdb undo                          # rmpc key: restore the most recently trashed song (repeatable)
+  musicdb lyrics --help             # lyrics from LRCLIB into lyrics_dir (rmpc's Lyrics pane)
   musicdb deletions [--json [--all]] [--retry]  # the deletion journal (--all adds finished permanent deletions);
                                                 # --retry runs failed remote steps (update does it)
   musicdb top [-n 30]                   # most played library songs
@@ -897,6 +898,9 @@ def missing(a):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "lyrics":
+        from . import lyrics
+        return lyrics.main(sys.argv[2:])
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
     sp.add_parser("import-mpdlog").set_defaults(fn=import_mpdlog)

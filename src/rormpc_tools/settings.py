@@ -31,6 +31,8 @@ MPD_LOG = _path("mpd_log", "MPD_LOG", XDG_CONFIG / "mpd/log")
 DATA_DIR = _path("data_dir", "MUSICDB_DATA", XDG_DATA / "rormpc-tools/data")
 # SQLite cache rebuilt from DATA_DIR when missing
 DB_FILE = _path("db_file", "MUSICDB", XDG_DATA / "rormpc-tools/plays.db")
+# lyrics files (LRCLIB): set rmpc's lyrics_dir to the same directory
+LYRICS_DIR = _path("lyrics_dir", "RORMPC_LYRICS_DIR", XDG_DATA / "rormpc-tools/lyrics")
 # YouTube OAuth client and token for yt-playlist
 SECRETS_DIR = _path("secrets_dir", "MUSICDB_SECRETS", XDG_DATA / "rormpc-tools/secrets")
 # ListenBrainz user whose listens musicdb imports; empty: the owner of the ListenBrainz token

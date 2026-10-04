@@ -13,6 +13,8 @@
 #db_file = "~/.local/share/rormpc-tools/plays.db"
 # yt-playlist's OAuth client and token [MUSICDB_SECRETS]
 #secrets_dir = "~/.local/share/rormpc-tools/secrets"
+# lyrics from LRCLIB (musicdb lyrics); set rmpc's lyrics_dir to the same directory [RORMPC_LYRICS_DIR]
+#lyrics_dir = "~/.local/share/rormpc-tools/lyrics"
 
 # ListenBrainz user whose listens musicdb imports; empty: the owner of the token in the listenbrainz-mpd config [LB_USER]
 #lb_user = ""
