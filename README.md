@@ -20,7 +20,9 @@ rormpc's `scripts/rormpc_install.sh companions` installs the pinned version and 
 `uv tool install --editable .`.
 
 Needs MPD with `sticker_file` set (stickers hold the counts), `mpc`; `yt-mp3-mb` needs `yt-dlp` and `ffmpeg`,
-`fpcalc` (AcoustID) is optional. ListenBrainz features read the token from the
+`fpcalc` (AcoustID) is optional. When neither the video's MusicBrainz link nor AcoustID knows a song, `yt-mp3-mb`
+asks Shazam through `shazamio` (an unofficial API: answers are cached, a Shazam-only match is always confirmed by
+you, never written on its own). ListenBrainz features read the token from the
 [listenbrainz-mpd](https://codeberg.org/elomatreb/listenbrainz-mpd) config (or `$LISTENBRAINZ_TOKEN`).
 
 ### YouTube playlists (optional)

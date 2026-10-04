@@ -4,10 +4,12 @@ Evidence per track (strongest first):
   - MusicBrainz URL relationship to the YouTube video (exact),
   - "Provided to YouTube by" block in the description (official Topic uploads),
   - AcoustID fingerprint (fpcalc),
+  - Shazam (unofficial API via shazamio), only when the two above found nothing: its artist/title is a hint that
+    the ListenBrainz lookup and the MB search turn into an MBID,
   - ListenBrainz metadata lookup on artist/title parsed from the video title.
 decide() ranks candidate recordings, resolve() turns the best one into canonical MB names.
 """
-import json, os, pathlib, re, subprocess, sys, time, unicodedata, urllib.error, urllib.parse, urllib.request
+import hashlib, json, os, pathlib, re, subprocess, sys, time, unicodedata, urllib.error, urllib.parse, urllib.request
 from difflib import SequenceMatcher
 from http.client import IncompleteRead  # not `import http.client`: http() below would shadow the module
 
@@ -19,6 +21,7 @@ LB_CONFIGS = [pathlib.Path.home() / "Library/Application Support/listenbrainz-mp
               pathlib.Path(os.environ.get("XDG_CONFIG_HOME", pathlib.Path.home() / ".config")) / "listenbrainz-mpd/config.toml"]
 CACHE = pathlib.Path(os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")) / "ytmb"
 _last = {}
+SHAZAM_INTERVAL = 2  # external rate limit: the unofficial Shazam API throttles bursts
 
 
 def lb_token():
@@ -154,7 +157,37 @@ def acoustid(path):
             if rec.get("title"):
                 res.append({"score": x["score"], "mbid": rec["id"], "title": rec["title"], "duration": rec.get("duration"),
                             "artists": [a["name"] for a in rec.get("artists", [])]})
-    return {"results": res[:8], "status": (r or {}).get("status")}
+    return {"results": res[:8], "status": (r or {}).get("status"),
+            "fp_sha1": hashlib.sha1(fp["fingerprint"].encode()).hexdigest()}  # the audio's id, survives retags/renames
+
+
+def shazam(path, key=None):
+    """{"artist", "title"} from Shazam, {} when it doesn't know the song, {"error": ...} when it can't be asked.
+    shazamio talks to Shazam's unofficial API: answers are cached under the fingerprint key, calls are serial and
+    at most one per SHAZAM_INTERVAL s."""
+    f = CACHE / f"shazam-{key}.json" if key else None
+    if f and f.exists():
+        return json.loads(f.read_text())
+    try:
+        import asyncio
+        from shazamio import Shazam
+    except ImportError as e:
+        return {"error": f"shazamio missing: {e}"}
+    wait = _last.get("shazam", 0) + SHAZAM_INTERVAL - time.time()
+    if wait > 0:
+        time.sleep(wait)
+    try:
+        r = asyncio.run(Shazam().recognize(str(path)))
+    except Exception as e:  # network, API change: unknown, not "no match", so not cached
+        return {"error": f"{type(e).__name__}: {e}"}
+    finally:
+        _last["shazam"] = time.time()
+    t = r.get("track") or {}
+    res = {"artist": t["subtitle"], "title": t["title"]} if t.get("subtitle") and t.get("title") else {}
+    if f:
+        CACHE.mkdir(exist_ok=True)
+        f.write_text(json.dumps(res, ensure_ascii=False))
+    return res
 
 
 def lb_lookup(artist, title, token):
@@ -185,9 +218,15 @@ def collect(path, ytid, channel, title, desc, duration, yt_artist=None, yt_track
          "desc": (desc or "")[:3000], "provided": provided_block(desc), "cands": cands}
     d["mb_url"] = mb_url(ytid)
     d["acoustid"] = acoustid(path) if duration < 900 else {"skipped": "long"}
+    d["shazam"] = {}
+    if not d["mb_url"] and not d["acoustid"].get("results") and duration < 900:
+        d["shazam"] = shazam(path, d["acoustid"].get("fp_sha1"))
     token = lb_token()
     q = [(", ".join(d["provided"]["artists"]), d["provided"]["title"])] if d["provided"] else []
     d["lb"] = [{"q": [a, t], "r": lb_lookup(a, t, token)} for a, t in (q + cands[:3]) if a and t]
+    if d["shazam"].get("title"):
+        a, t = d["shazam"]["artist"], d["shazam"]["title"]
+        d["lb"].append({"q": [a, t], "r": lb_lookup(a, t, token), "source": "shazam"})
     return d
 
 
@@ -223,6 +262,8 @@ def score_candidate(d, title, artists):
     """How well an MB (title, artists) matches what the YouTube side says (0..1)."""
     artists = artists if isinstance(artists, list) else [artists]
     pairs = list(d["cands"])
+    if d.get("shazam", {}).get("title"):
+        pairs.insert(0, (d["shazam"]["artist"], d["shazam"]["title"]))
     if d["provided"]:
         pairs.insert(0, (", ".join(d["provided"]["artists"]), d["provided"]["title"]))
     best = 0.0
@@ -249,7 +290,8 @@ def decide(d):
         cands.append((s + 0.3 * (x["score"] - 0.5), "acoustid", x["mbid"]))
     for x in d["lb"]:
         if x["r"]:
-            cands.append((score_candidate(d, x["r"]["recording_name"], x["r"]["artist_credit_name"]) + 0.05, "lb-lookup", x["r"]["recording_mbid"]))
+            cands.append((score_candidate(d, x["r"]["recording_name"], x["r"]["artist_credit_name"]) + 0.05,
+                          x.get("source", "lb-lookup"), x["r"]["recording_mbid"]))
     by = {}
     for s, m, mbid in cands:
         e = by.setdefault(mbid, [0, set()])
@@ -284,7 +326,8 @@ def mb_search_fallback(d):
     """Direct MB recording search for parsed "Artist - Title" pairs; needs a close name + duration match."""
     if versions(d["clean"]):  # remixes/covers/live: a stripped-title search picks the wrong version
         return None
-    for a, t in d["cands"][:2]:
+    sz = [(d["shazam"]["artist"], d["shazam"]["title"])] if d.get("shazam", {}).get("title") else []
+    for a, t in sz + d["cands"][:2]:
         a = re.sub(r"\s+(and|x|vs\.?)\s+", " & ", a, flags=re.I)
         t = re.sub(r"\s*[\(\[].*?[\)\]]", "", t).strip()
         if not a or not t or len(t) > 60:
@@ -333,7 +376,8 @@ def resolve(d):
         row["check"] = min(row["check"], round(max(sim(", ".join(pa), row["artist"]), sim(pa[0], row["artist"])), 2))
     if row["mbid"] and re.search(r"\b(clip|video|videoclip|MV)\b", row["title"], re.I):
         row["check"] = min(row["check"], 0.7)  # MB "video" recording, prefer the audio one
-    if row["mbid"] and (row["score"] >= 1.0 or "mb-url" in row["method"]) and row["check"] >= 0.8:
+    if row["mbid"] and (row["score"] >= 1.0 or "mb-url" in row["method"]) and row["check"] >= 0.8 \
+            and row["method"] != "shazam":  # Shazam alone also agrees with itself in check; a person confirms it
         row["status"] = "auto"
     elif row["mbid"] and row["check"] >= 0.6:
         row["status"] = "review"
