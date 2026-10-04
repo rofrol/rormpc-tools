@@ -552,6 +552,7 @@ def update(a):
     network(import_lb, a)
     sync(a)
     network(lb_playlists, argparse.Namespace(user=None, n=0, download=False, all=False))
+    network(youtube_index_daily)
     export(a)
     if failed:
         sys.exit("failed: " + "; ".join(failed))
@@ -668,6 +669,15 @@ def plays_of(events):
 def lb_listens(r):
     """ListenBrainz listens of a song that can be deleted (the API needs their msid)."""
     return [e for e in r["events"] if e["source"] == "lb" and json.loads(e["extra"] or "{}").get("msid")]
+
+
+def youtube_index_daily():
+    """Refresh yt-playlist's cached index once a day, so the delete menu knows the playlists when the login has
+    expired. Quietly does nothing without chosen playlists or a valid login."""
+    idx = settings.XDG_CACHE / "rormpc-tools" / "youtube-index.json"
+    if not (DATA / "youtube-playlists.json").exists() or (idx.exists() and time.time() - idx.stat().st_mtime < 20 * 3600):
+        return
+    subprocess.run([sys.executable, "-m", "rormpc_tools.yt_playlist", "index"], capture_output=True, stdin=subprocess.DEVNULL)
 
 
 def youtube_playlists(ytid):

@@ -5,6 +5,10 @@
   yt-playlist use ID [ID ...]          # the music playlists musicdb deletions should clean up
   yt-playlist find VIDEO_ID [--json]   # which of those playlists contain the video (--json: with titles)
   yt-playlist remove VIDEO_ID [--dry-run]   # remove the video from those playlists
+  yt-playlist index [--json]           # cache which videos the chosen playlists hold (musicdb update: daily)
+
+When the login has expired, `find --json` answers from the cached index and says when it was checked
+("cached_at"), so rormpc's delete menu still names the playlists; removing always needs a live login.
 
 Setup (once): Google Cloud project with "YouTube Data API v3" enabled, OAuth consent
 screen in "Testing" with yourself as a test user, an OAuth client of type "Desktop app", its JSON saved as
@@ -12,7 +16,7 @@ youtube-client.json in secrets_dir (settings). Testing apps get refresh tokens t
 run from a terminal opens the browser to log in again when needed (publishing would need a privacy policy). Playlist choice is kept in
 $MUSICDB_DATA/youtube-playlists.json. Quota: a list page costs 1 unit, a removal 50 (10,000 a day).
 """
-import argparse, json, sys
+import argparse, datetime as dt, json, sys
 
 from . import settings
 
@@ -20,6 +24,7 @@ SECRETS = settings.SECRETS_DIR
 CLIENT, TOKEN = SECRETS / "youtube-client.json", SECRETS / "youtube-token.json"
 DATA = settings.DATA_DIR
 CHOSEN = DATA / "youtube-playlists.json"
+INDEX = settings.XDG_CACHE / "rormpc-tools" / "youtube-index.json"
 SCOPES = ["https://www.googleapis.com/auth/youtube"]  # read + edit your playlists
 
 
@@ -83,6 +88,35 @@ def items_with(yt, video_id):
     return out
 
 
+def build_index(yt):
+    """{checked_at, playlists: {id: {title, items: {video id: [playlist item ids]}}}} of the chosen playlists,
+    written atomically. A list page costs 1 quota unit per 50 videos."""
+    names = titles(yt)
+    out = {"checked_at": dt.datetime.now().isoformat(timespec="seconds"), "playlists": {}}
+    for pid in chosen():
+        items = {}
+        for it in pages(yt.playlistItems().list, part="id,snippet", playlistId=pid):
+            vid = it["snippet"].get("resourceId", {}).get("videoId")
+            if vid:
+                items.setdefault(vid, []).append(it["id"])
+        out["playlists"][pid] = {"title": names.get(pid, pid), "items": items}
+    INDEX.parent.mkdir(parents=True, exist_ok=True)
+    tmp = INDEX.with_suffix(".tmp")
+    tmp.write_text(json.dumps(out, ensure_ascii=False))
+    tmp.replace(INDEX)
+    return out
+
+
+def cached_find(video, why):
+    """find --json from the cached index, or the error when there is none (never "in no playlist")."""
+    if not INDEX.exists():
+        return {"video": video, "error": why}
+    idx = json.loads(INDEX.read_text())
+    hits = [{"id": pid, "title": pl["title"], "item": item}
+            for pid, pl in idx["playlists"].items() if pid in chosen() for item in pl["items"].get(video, [])]
+    return {"video": video, "playlists": hits, "cached_at": idx["checked_at"], "note": why}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
@@ -91,7 +125,24 @@ def main():
     p = sp.add_parser("use"); p.add_argument("ids", nargs="+")
     p = sp.add_parser("find"); p.add_argument("video"); p.add_argument("--json", action="store_true")
     p = sp.add_parser("remove"); p.add_argument("video"); p.add_argument("--dry-run", action="store_true")
+    p = sp.add_parser("index"); p.add_argument("--json", action="store_true")
     a = ap.parse_args()
+    if a.cmd == "find" and a.json:
+        try:
+            yt = api()
+        except SystemExit as e:  # login expired: answer from the cache, saying how old it is
+            print(json.dumps(cached_find(a.video, str(e)), ensure_ascii=False))
+            return
+        hits = items_with(yt, a.video)
+        names = titles(yt)
+        print(json.dumps({"video": a.video, "playlists": [{"id": pid, "title": names.get(pid, pid), "item": item}
+                                                          for pid, item in hits]}, ensure_ascii=False))
+        return
+    if a.cmd == "index":
+        out = build_index(api())
+        n = sum(len(pl["items"]) for pl in out["playlists"].values())
+        print(json.dumps(out, ensure_ascii=False) if a.json else f"indexed {len(out['playlists'])} playlists, {n} videos -> {INDEX}")
+        return
     if a.cmd == "auth":
         api(interactive=True)
         print(f"logged in; token in {TOKEN}")
