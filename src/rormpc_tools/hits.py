@@ -144,8 +144,23 @@ def artist_genres(mbid):
 
 
 def genres(song):
-    """Recording tags only when they are backed by several votes, else the artist's main genres."""
-    return song.get("tags") or artist_genres(song.get("artist_mbid"))
+    """Recording tags only when they are backed by several votes, else the artist's main genres; for library
+    songs with my additions/exclusions (`musicdb genre`) applied."""
+    from .tags import effective_genres
+    base = song.get("tags") or artist_genres(song.get("artist_mbid"))
+    return effective_genres(base, song["file"], song.get("mbid"), MANUAL_GENRES()) if song.get("file") else base
+
+
+_manual = None
+
+
+def MANUAL_GENRES():
+    """musicdb genre's log, read once per run."""
+    global _manual
+    if _manual is None:
+        from .tags import manual_genres
+        _manual = manual_genres()
+    return _manual
 
 
 def lb_popularity(mbids):

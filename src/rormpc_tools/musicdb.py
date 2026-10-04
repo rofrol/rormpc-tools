@@ -17,6 +17,8 @@
                                         # also deletes the history (LB listens: irreversible, YouTube playlists)
   musicdb delete --preview [--youtube] [FILE...]  # JSON: plays, LB listens, YouTube playlists; changes nothing
   musicdb undo                          # rmpc key: restore the most recently trashed song (repeatable)
+  musicdb tag add|remove|list|of ...   # hand-made lists (God, melancholic, ...); musicdb tag --help
+  musicdb genre add|exclude|reset GENRE --current   # correct a song's MusicBrainz genres
   musicdb chart [--bucket month] [--open]  # HTML page: how my most played songs rose and fell
   musicdb lyrics --help             # lyrics from LRCLIB into lyrics_dir (rmpc's Lyrics pane)
   musicdb deletions [--json [--all]] [--retry]  # the deletion journal (--all adds finished permanent deletions);
@@ -103,7 +105,9 @@ def export(_a):
         (DATA / f"{table}.jsonl").write_text("".join(
             json.dumps({k: v for k, v in zip(cols, r) if v not in ("", None)}, ensure_ascii=False) + "\n" for r in rows))
     git = lambda *a: subprocess.run(["git", "-C", str(DATA), *a], capture_output=True, text=True)
-    git("add", "events.jsonl", "favorites.jsonl", "tombstones.jsonl", "skips.jsonl", "deletions")
+    # the hand-written logs (tag lists, manual genres, hidden hits) are committed with the hourly export
+    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl") if (DATA / f).exists()]
+    git("add", "events.jsonl", "favorites.jsonl", "tombstones.jsonl", "skips.jsonl", "deletions", *logs)
     if git("diff", "--cached", "--quiet").returncode:
         n = git("diff", "--cached", "--numstat").stdout.split()[:1]
         git("commit", "-q", "-m", f"musicdb: +{n[0] if n else '?'} lines")
@@ -899,6 +903,9 @@ def missing(a):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("tag", "genre"):
+        from . import tags
+        return (tags.main_tag if sys.argv[1] == "tag" else tags.main_genre)(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "chart":
         from . import chart
         return chart.main(sys.argv[2:])
