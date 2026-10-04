@@ -6,6 +6,7 @@
   hits 1990s -g "hip hop,r&b" --rank listens  # rank by ListenBrainz listen counts instead of chart points
   hits 1980s -g rock --playlist               # write MPD playlist "Hits 1980s rock top100" (songs in the library)
   hits 1980s -g rock --download               # yt-mp3-mb the missing ones into <music>/Hits/1980s (first hit, unverified)
+  hits genres [pin|unpin GENRE]               # every genre of the library with counts; Hits checkboxes
   hits fetch --help                           # verified import queue for missing songs (rormpc: Fetch missing…)
   hits all -n 10 -g "+rock -thrash metal" --playlist   # top 10 of every decade, one playlist ordered by decade
   hits all -n 10 --owned --playlist           # the 10 biggest hits you have from each decade
@@ -185,10 +186,15 @@ def lb_popularity(mbids):
 def genre_filter(spec):
     """'+rock -thrash metal, pop' -> predicate over a list of genre names.
     Included genres are ORed, excluded ones win; word match, so 'rock' hits 'hard rock'. '+' is optional."""
+    from .genres import load_pins
+    aliases = load_pins()["aliases"]
+    def spellings(t):  # "rap" also finds "hip hop" and "hip-hop" (aliases in hits-genres.json)
+        canon = aliases.get(t, t)
+        return {canon} | {k for k, v in aliases.items() if v == canon}
     inc, exc = [], []
     for tok in re.findall(r"[-+]?[^,\s][^,]*?(?=\s+[-+]|,|$)", spec or ""):
         tok = tok.strip()
-        (exc if tok.startswith("-") else inc).append(tok.lstrip("-+").strip().lower())
+        (exc if tok.startswith("-") else inc).extend(spellings(tok.lstrip("-+").strip().lower()))
     word = lambda g, t: re.search(rf"(?<![\w&]){re.escape(t)}(?![\w&])", g.lower())
     def ok(gs):
         if any(word(g, t) for g in gs for t in exc):
@@ -561,6 +567,9 @@ def prefetch(a):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "genres":
+        from . import genres
+        return genres.main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "fetch":
         from . import fetch
         return fetch.main(sys.argv[2:])
