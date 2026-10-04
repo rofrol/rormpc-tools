@@ -7,6 +7,7 @@ They work from the shell too; each one's usage is in its `--help`.
 |---|---|
 | `hits` | Billboard year-end chart hits by decade or years, genre filter (MusicBrainz), what you own; `--json` feeds rormpc's Hits pane, `--playlist` writes an MPD playlist; `hits fetch` is a verified import queue for the missing ones |
 | `musicdb` | play history (ListenBrainz, MPD log, Takeout, Spotify export) -> MPD stickers `plays`, `lastPlayed`, `skips`; likes to ListenBrainz; `delete` / `undo` behind rormpc's Ctrl-x / Ctrl-y |
+| `musicdb chart` | a standalone HTML page: how my most played songs rose and fell (top 10 ranks, top 100 shares, which source the plays come from) |
 | `musicdb lyrics` | lyrics from LRCLIB into `lyrics_dir` (`.lrc` synced, `.txt` plain) for rormpc's Lyrics pane; `candidates` / `use` pick another entry |
 | `mpd-gap` | seconds of silence between songs |
 | `yt-mp3-mb` | YouTube -> mp3 identified on MusicBrainz, tagged, cover embedded |

@@ -17,6 +17,7 @@
                                         # also deletes the history (LB listens: irreversible, YouTube playlists)
   musicdb delete --preview [--youtube] [FILE...]  # JSON: plays, LB listens, YouTube playlists; changes nothing
   musicdb undo                          # rmpc key: restore the most recently trashed song (repeatable)
+  musicdb chart [--bucket month] [--open]  # HTML page: how my most played songs rose and fell
   musicdb lyrics --help             # lyrics from LRCLIB into lyrics_dir (rmpc's Lyrics pane)
   musicdb deletions [--json [--all]] [--retry]  # the deletion journal (--all adds finished permanent deletions);
                                                 # --retry runs failed remote steps (update does it)
@@ -898,6 +899,9 @@ def missing(a):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "chart":
+        from . import chart
+        return chart.main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "lyrics":
         from . import lyrics
         return lyrics.main(sys.argv[2:])

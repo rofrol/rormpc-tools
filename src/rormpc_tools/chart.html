@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Most Played Songs</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface: #fcfcfb; --surface-2: #f3f2ef; --grid: #e4e3df;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #8a8984;
+  --line-rest: #b9b8b2; --focus: #2a78d6; --thin: #f0efec;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface: #1a1a19; --surface-2: #232321; --grid: #33332f;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --line-rest: #5a5955; --focus: #3987e5; --thin: #262624;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #1a1a19; --surface-2: #232321; --grid: #33332f;
+  --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+  --line-rest: #5a5955; --focus: #3987e5; --thin: #262624;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface); color: var(--text-primary);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 32px 0 4px; }
+p.sub, p.note { color: var(--text-secondary); margin: 0 0 12px; }
+p.note { font-size: 13px; }
+svg text { fill: var(--text-muted); font-size: 11px; }
+.axis line, .grid line { stroke: var(--grid); }
+.bump-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; align-items: start; }
+@media (max-width: 760px) { .bump-wrap { grid-template-columns: 1fr; } }
+ol.songs { margin: 0; padding: 0; list-style: none; }
+ol.songs li { display: grid; grid-template-columns: 22px 1fr auto; gap: 6px; padding: 4px 6px; border-radius: 4px;
+  cursor: default; color: var(--text-secondary); }
+ol.songs li .n { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+ol.songs li .t { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+ol.songs li.on { background: var(--surface-2); color: var(--text-primary); }
+.series { fill: none; stroke: var(--line-rest); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.series.on { stroke: var(--focus); stroke-width: 3; }
+.dot { fill: var(--line-rest); stroke: var(--surface); stroke-width: 2; }
+.dot.on { fill: var(--focus); }
+.endlabel { font-size: 11px; fill: var(--text-muted); }
+.endlabel.on { fill: var(--text-primary); font-weight: 600; }
+.thinband { fill: var(--thin); }
+.grid-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
+.card { padding: 8px 10px; border-radius: 6px; background: var(--surface-2); min-width: 0; }
+.card .name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-primary); }
+.card .meta { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.spark { fill: none; stroke: var(--s1); stroke-width: 2; stroke-linejoin: round; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--text-secondary); margin: 4px 0 8px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+#tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--text-primary);
+  border: 1px solid var(--grid); border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgb(0 0 0 / .15);
+  display: none; max-width: 320px; z-index: 10; }
+#tip .k { color: var(--text-muted); }
+details { margin-top: 32px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--grid); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Most played songs over time</h1>
+  <p class="sub" id="sub"></p>
+
+  <h2>Where the plays come from</h2>
+  <p class="note" id="covnote"></p>
+  <div class="legend" id="covlegend"></div>
+  <svg id="coverage" role="img" aria-label="Plays per period by source"></svg>
+
+  <h2 id="bumptitle"></h2>
+  <p class="note">Rank among all songs played in that period (1 = most played). Gaps: not played, or ranked
+    below <span id="maxrank"></span>. Grey bands: too few plays to trust the ranking. Hover a line or a name.</p>
+  <div class="bump-wrap">
+    <svg id="bump" role="img" aria-label="Rank of the ten most played songs per period"></svg>
+    <ol class="songs" id="bumplist"></ol>
+  </div>
+
+  <h2>Top 100: share of each period's plays</h2>
+  <p class="note">Each card has its own scale; the peak share is written under the name. Thin periods are left out.</p>
+  <div class="grid-cards" id="cards"></div>
+
+  <details>
+    <summary>Table of the top 100</summary>
+    <table id="table"><thead><tr><th class="num">#</th><th>Song</th><th class="num">Plays</th>
+      <th class="num">Best rank</th><th>First</th><th>Last</th></tr></thead><tbody></tbody></table>
+  </details>
+  <details>
+    <summary>Table of plays per period and source</summary>
+    <table id="covtable"></table>
+  </details>
+</main>
+<div id="tip"></div>
+<script>
+const D = /*DATA*/null;
+const NS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs = {}, parent) => {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (parent) parent.appendChild(e);
+  return e;
+};
+const tip = document.getElementById("tip");
+function showTip(html, ev) {
+  tip.innerHTML = html; tip.style.display = "block";
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + w > innerWidth - 8) x = ev.clientX - w - 14;
+  if (y + h > innerHeight - 8) y = ev.clientY - h - 14;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+const hideTip = () => { tip.style.display = "none"; };
+const esc = s => s.replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const B = D.buckets, n = B.length, period = D.kind === "month" ? "month" : "quarter";
+const thin = D.coverage.map(c => c.total < D.thin);
+const yearTicks = B.map((b, i) => [b, i]).filter(([b, i]) => i === 0 || b.slice(0, 4) !== B[i - 1].slice(0, 4));
+
+document.getElementById("sub").textContent =
+  `${D.events.toLocaleString()} plays from ${B[0]} to ${B[n - 1]}, by ${period}. Spotify counts a play from 30 s; ` +
+  `ListenBrainz and the local scrobbler from 90 % of the song.`;
+document.getElementById("maxrank").textContent = `#${D.max_rank}`;
+document.getElementById("bumptitle").textContent = `Top ${D.top_bump}: rank per ${period}`;
+
+// x positions shared by the coverage strip and the bump chart
+const W = 860, L = 36, R = 44;
+const x = i => L + (n === 1 ? 0 : i * (W - L - R) / (n - 1));
+const step = n > 1 ? (W - L - R) / (n - 1) : 20;
+
+// ---- coverage: stacked bars per period, one colour per source (fixed order)
+(function coverage() {
+  const H = 120, T = 6, Bm = 20, svg = document.getElementById("coverage");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.style.width = "100%";
+  const max = Math.max(...D.coverage.map(c => c.total), 1);
+  const y = v => H - Bm - v * (H - Bm - T) / max;
+  const colors = D.sources.map((_, i) => `var(--s${i % 5 + 1})`);
+  document.getElementById("covlegend").innerHTML =
+    D.sources.map((s, i) => `<span><i style="background:${colors[i]}"></i>${esc(s)}</span>`).join("");
+  const thinCount = thin.filter(Boolean).length;
+  document.getElementById("covnote").textContent =
+    `Plays per ${period}. A change of source looks like a change of taste; ${thinCount} of ${n} periods have fewer ` +
+    `than ${D.thin} plays.`;
+  el("line", {x1: L, x2: W - R, y1: H - Bm, y2: H - Bm, class: "axis", stroke: "var(--grid)"}, svg);
+  for (const [b, i] of yearTicks) el("text", {x: x(i), y: H - 6, "text-anchor": "middle"}, svg).textContent = b.slice(0, 4);
+  const bw = Math.max(2, Math.min(18, step - 2));
+  D.coverage.forEach((c, i) => {
+    let acc = 0;
+    const g = el("g", {}, svg);
+    D.sources.forEach((s, j) => {
+      const v = c.sources[s]; if (!v) return;
+      const y0 = y(acc), y1 = y(acc + v);
+      el("rect", {x: x(i) - bw / 2, y: y1, width: bw, height: Math.max(0, y0 - y1 - (acc ? 1 : 0)),
+                  rx: 1.5, fill: colors[j], opacity: thin[i] ? 0.45 : 1}, g);
+      acc += v;
+    });
+    const hit = el("rect", {x: x(i) - step / 2, y: T, width: step, height: H - Bm - T, fill: "transparent"}, g);
+    hit.addEventListener("mousemove", ev => showTip(
+      `<b>${c.bucket}</b> · ${c.total} plays${thin[i] ? " (thin)" : ""}<br>` +
+      D.sources.filter(s => c.sources[s]).map(s => `<span class="k">${esc(s)}</span> ${c.sources[s]}`).join("<br>"), ev));
+    hit.addEventListener("mouseleave", hideTip);
+  });
+})();
+
+// ---- bump chart of the top songs
+(function bump() {
+  const songs = D.songs.slice(0, D.top_bump), H = 380, T = 12, Bm = 22, svg = document.getElementById("bump");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.style.width = "100%";
+  const y = r => T + (r - 1) * (H - T - Bm) / (D.max_rank - 1);
+  thin.forEach((t, i) => { if (t) el("rect", {x: x(i) - step / 2, y: T - 6, width: step, height: H - Bm - T + 12, class: "thinband"}, svg); });
+  const grid = el("g", {class: "grid"}, svg);
+  for (const r of [1, 5, 10, 20, 30].filter(r => r <= D.max_rank)) {
+    el("line", {x1: L, x2: W - R, y1: y(r), y2: y(r)}, grid);
+    el("text", {x: L - 6, y: y(r) + 4, "text-anchor": "end"}, svg).textContent = `#${r}`;
+  }
+  for (const [b, i] of yearTicks) el("text", {x: x(i), y: H - 6, "text-anchor": "middle"}, svg).textContent = b.slice(0, 4);
+  const layers = songs.map((s, k) => {
+    const g = el("g", {}, svg);
+    let d = "", pen = false;
+    s.series.forEach((p, i) => {
+      const ok = p.rank && p.rank <= D.max_rank;
+      if (ok) { d += `${pen ? "L" : "M"}${x(i).toFixed(1)},${y(p.rank).toFixed(1)}`; pen = true; } else pen = false;
+    });
+    const path = el("path", {d, class: "series"}, g);
+    const dots = [];
+    s.series.forEach((p, i) => { if (p.rank && p.rank <= D.max_rank) dots.push(el("circle", {cx: x(i), cy: y(p.rank), r: 4, class: "dot"}, g)); });
+    const lastI = s.series.map(p => p.rank && p.rank <= D.max_rank).lastIndexOf(true);
+    let label = null;
+    if (lastI >= 0) {
+      label = el("text", {x: x(lastI) + 7, y: y(s.series[lastI].rank) + 4, class: "endlabel"}, g);
+      label.textContent = k + 1;
+    }
+    return {g, path, dots, label};
+  });
+  const list = document.getElementById("bumplist");
+  songs.forEach((s, k) => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="n">${k + 1}</span><span>${esc(s.name)}</span><span class="t">${s.total}</span>`;
+    li.addEventListener("mouseenter", () => focus(k));
+    li.addEventListener("mouseleave", () => focus(null));
+    list.appendChild(li);
+  });
+  function focus(k) {
+    layers.forEach((l, j) => {
+      const on = j === k;
+      l.path.classList.toggle("on", on); l.dots.forEach(d => d.classList.toggle("on", on));
+      if (l.label) l.label.classList.toggle("on", on);
+      if (on) svg.appendChild(l.g);
+      list.children[j].classList.toggle("on", on);
+    });
+  }
+  // nearest point under the pointer picks the song; the tooltip names it with its plays
+  svg.addEventListener("mousemove", ev => {
+    const pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY;
+    const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+    const i = Math.max(0, Math.min(n - 1, Math.round((p.x - L) / (step || 1))));
+    let best = null, bd = 28;
+    songs.forEach((s, k) => {
+      const q = s.series[i];
+      if (q.rank && q.rank <= D.max_rank) { const dd = Math.abs(y(q.rank) - p.y); if (dd < bd) { bd = dd; best = k; } }
+    });
+    focus(best);
+    if (best === null) return hideTip();
+    const q = songs[best].series[i];
+    showTip(`<b>${esc(songs[best].name)}</b><br>${B[i]}: #${q.rank} · ${q.plays} plays` +
+            `<br><span class="k">${D.coverage[i].total} plays that ${period}${thin[i] ? " (thin)" : ""}</span>`, ev);
+  });
+  svg.addEventListener("mouseleave", () => { focus(null); hideTip(); });
+})();
+
+// ---- small multiples of play share
+(function cards() {
+  const box = document.getElementById("cards"), w = 190, h = 44;
+  D.songs.forEach((s, k) => {
+    const card = document.createElement("div"); card.className = "card";
+    const peak = Math.max(...s.series.map(p => p.share || 0));
+    card.innerHTML = `<div class="name" title="${esc(s.name)}">${k + 1}. ${esc(s.name)}</div>` +
+      `<div class="meta">${s.total} plays · peak ${(peak * 100).toFixed(1)} % · ${s.first} – ${s.last}</div>`;
+    const svg = el("svg", {viewBox: `0 0 ${w} ${h}`, width: "100%", height: h});
+    const sx = i => 3 + (n === 1 ? 0 : i * (w - 6) / (n - 1)), sy = v => h - 3 - (peak ? v / peak : 0) * (h - 8);
+    el("line", {x1: 0, x2: w, y1: h - 3, y2: h - 3, stroke: "var(--grid)"}, svg);
+    let d = "", pen = false;
+    s.series.forEach((p, i) => {
+      if (p.share !== null && p.share !== undefined) { d += `${pen ? "L" : "M"}${sx(i).toFixed(1)},${sy(p.share).toFixed(1)}`; pen = true; }
+      else pen = false;
+    });
+    el("path", {d, class: "spark"}, svg);
+    // single points (a song played in one trusted period) would be invisible as a path
+    s.series.forEach((p, i) => {
+      const prev = s.series[i - 1], next = s.series[i + 1];
+      if (p.share != null && !(prev && prev.share != null) && !(next && next.share != null))
+        el("circle", {cx: sx(i), cy: sy(p.share), r: 2.5, fill: "var(--s1)"}, svg);
+    });
+    svg.addEventListener("mousemove", ev => {
+      const r = svg.getBoundingClientRect();
+      const i = Math.max(0, Math.min(n - 1, Math.round((ev.clientX - r.left) / r.width * (n - 1))));
+      const p = s.series[i];
+      showTip(`<b>${esc(s.name)}</b><br>${B[i]}: ${p.plays} plays` +
+              (p.share != null ? ` · ${(p.share * 100).toFixed(1)} %` : thin[i] ? " (thin period)" : ""), ev);
+    });
+    svg.addEventListener("mouseleave", hideTip);
+    card.appendChild(svg); box.appendChild(card);
+  });
+})();
+
+// ---- coverage table (the bar colours are not the only way to read the sources)
+(function covtable() {
+  const t = document.getElementById("covtable");
+  t.innerHTML = `<thead><tr><th>Period</th>${D.sources.map(s => `<th class="num">${esc(s)}</th>`).join("")}` +
+    `<th class="num">Total</th></tr></thead><tbody>` + D.coverage.map((c, i) => `<tr><td>${c.bucket}${thin[i] ? " (thin)" : ""}</td>` +
+    D.sources.map(s => `<td class="num">${c.sources[s] || ""}</td>`).join("") + `<td class="num">${c.total}</td></tr>`).join("") + "</tbody>";
+})();
+
+// ---- table view
+(function table() {
+  const tb = document.querySelector("#table tbody");
+  tb.innerHTML = D.songs.map((s, k) => `<tr><td class="num">${k + 1}</td><td>${esc(s.name)}</td>` +
+    `<td class="num">${s.total}</td><td class="num">${s.peak ? "#" + s.peak : ""}</td><td>${s.first}</td><td>${s.last}</td></tr>`).join("");
+})();
+</script>
+</body>
+</html>
