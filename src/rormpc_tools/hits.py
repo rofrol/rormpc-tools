@@ -5,7 +5,8 @@
                                               # MusicBrainz genres contains the word (hard rock, pop rock, ...)
   hits 1990s -g "hip hop,r&b" --rank listens  # rank by ListenBrainz listen counts instead of chart points
   hits 1980s -g rock --playlist               # write MPD playlist "Hits 1980s rock top100" (songs in the library)
-  hits 1980s -g rock --download               # yt-mp3-mb the missing ones into <music>/Hits/1980s
+  hits 1980s -g rock --download               # yt-mp3-mb the missing ones into <music>/Hits/1980s (first hit, unverified)
+  hits fetch --help                           # verified import queue for missing songs (rormpc: Fetch missing…)
   hits all -n 10 -g "+rock -thrash metal" --playlist   # top 10 of every decade, one playlist ordered by decade
   hits all -n 10 --owned --playlist           # the 10 biggest hits you have from each decade
   hits --years 1985-1992 --top 11-20 -g "+rock +pop -country"   # ranks 11-20% of that cohort
@@ -436,6 +437,9 @@ def prefetch(a):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "fetch":
+        from . import fetch
+        return fetch.main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] in ("hide", "unhide", "hidden"):
         return hide_cmd(sys.argv[1:])
     if len(sys.argv) > 1 and sys.argv[1] == "prefetch":

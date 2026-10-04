@@ -5,7 +5,7 @@ They work from the shell too; each one's usage is in its `--help`.
 
 | Command | What it does |
 |---|---|
-| `hits` | Billboard year-end chart hits by decade or years, genre filter (MusicBrainz), what you own; `--json` feeds rormpc's Hits pane, `--playlist` writes an MPD playlist |
+| `hits` | Billboard year-end chart hits by decade or years, genre filter (MusicBrainz), what you own; `--json` feeds rormpc's Hits pane, `--playlist` writes an MPD playlist; `hits fetch` is a verified import queue for the missing ones |
 | `musicdb` | play history (ListenBrainz, MPD log, Takeout, Spotify export) -> MPD stickers `plays`, `lastPlayed`, `skips`; likes to ListenBrainz; `delete` / `undo` behind rormpc's Ctrl-x / Ctrl-y |
 | `mpd-gap` | seconds of silence between songs |
 | `yt-mp3-mb` | YouTube -> mp3 identified on MusicBrainz, tagged, cover embedded |
@@ -53,6 +53,9 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   (ListenBrainz listens, YouTube playlist entries) goes only with `--listenbrainz`, and failed remote steps are
   retried by `musicdb update`. Deleted events become tombstones that re-imports skip. Listens of a recording that
   another library file still has are not deleted.
+- `hits fetch` puts a download into the library only when its MusicBrainz recording is the chart's own; everything
+  else waits in review outside the music dir. It never retags a file to make it agree. Rejected songs stay in the
+  queue file so they are never fetched again.
 - Likes: rmpc's `like` sticker is the source of truth; only changes go to ListenBrainz, and a song without a like
   sticker never clears LB feedback.
 - Skips stay local: nothing about them is sent to ListenBrainz.
