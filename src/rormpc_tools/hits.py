@@ -13,6 +13,7 @@
   hits 1980s --top 1-10 --json ~/.cache/rormpc/hits/current.json  # result file for rormpc's Hits pane
   hits prefetch 1959-2025                     # warm the caches (charts + MusicBrainz, ~1 request/s)
   hits --source likes [--sort rediscover]     # your liked songs instead of a chart
+  hits --source recs                          # recommendations: artists similar to your most played (LB Radio)
   hits hide --artist A --title T [--mbid M]   # hide a song from every Hits result (log in the data repo)
   hits unhide --artist A --title T; hits hidden [--json]   # undo / review
 
@@ -303,6 +304,109 @@ def likes_rows(years, a, lib, plays, last):
     return [s for s in rows if in_top(s["rank"], len(rows), top)] if top else rows[: a.n]
 
 
+RECS_SEEDS = 8  # most played artists used as seeds
+RECS_SIMILAR = 8  # similar artists per seed (LB Radio)
+
+
+def recs_seeds(lib, plays):
+    """Artists I play most (likes count extra), as (artist MBID, name, weight): plays per artist MBID tag."""
+    from mpd import MPDClient
+    c = MPDClient(); c.connect(os.environ.get("MPD_HOST", "localhost"), int(os.environ.get("MPD_PORT", 6600)))
+    liked = {x["file"] for x in c.sticker_find("song", "", "like") if x.get("sticker", "").endswith("=2")}
+    weight, names = {}, {}
+    for t in c.listallinfo():
+        f, mbid = t.get("file"), t.get("musicbrainz_artistid")
+        if not f or not mbid:
+            continue
+        mbid = (mbid[0] if isinstance(mbid, list) else mbid).split("/")[0].strip()
+        weight[mbid] = weight.get(mbid, 0) + plays.get(f, 0) + (5 if f in liked else 0)
+        names.setdefault(mbid, musicdb.one(t.get("artist", "")))
+    top = sorted((w, m) for m, w in weight.items() if w > 0)[::-1][:RECS_SEEDS]
+    return [(m, names[m], w) for w, m in top]
+
+
+def lb_radio(artist_mbid):
+    """LB Radio's similar-artist recordings for one seed, cached per day (the radio is shuffled per call):
+    {similar artist mbid: [{recording_mbid, similar_artist_name, total_listen_count}]} or {} on failure."""
+    f = CACHE / "recs" / f"radio-{artist_mbid}-{dt.date.today()}.json"
+    if f.exists():
+        return json.loads(f.read_text())
+    q = urllib.parse.urlencode({"mode": "easy", "max_similar_artists": RECS_SIMILAR, "max_recordings_per_artist": 3,
+                                "pop_begin": 0, "pop_end": 100})
+    r = mbtag.http(f"https://api.listenbrainz.org/1/lb-radio/artist/{artist_mbid}?{q}", host_interval=0.5, attempts=2, timeout=15)
+    if not isinstance(r, dict):
+        print(f"warning: LB Radio failed for {artist_mbid}", file=sys.stderr)
+        return {}
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(r))
+    return r
+
+
+def lb_metadata(mbids):
+    """Names, credits and tags of recordings from ListenBrainz, 50 per call, cached for good (a recording's name
+    and credit rarely change): {mbid: metadata}. A slow or failing call skips those rows with a warning."""
+    f = CACHE / "recs" / "metadata.json"
+    cache = json.loads(f.read_text()) if f.exists() else {}
+    todo = [m for m in mbids if m not in cache]
+    for i in range(0, len(todo), 50):
+        q = urllib.parse.urlencode({"recording_mbids": ",".join(todo[i:i + 50]), "inc": "artist tag"})
+        # 2 tries x 15 s: the metadata endpoint sometimes hangs, and rormpc waits for this run
+        r = mbtag.http(f"https://api.listenbrainz.org/1/metadata/recording/?{q}", host_interval=0.5, attempts=2, timeout=15)
+        if r is None:
+            print(f"warning: ListenBrainz metadata unavailable, {len(todo) - i} recommendations skipped", file=sys.stderr)
+            break
+        cache |= r
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cache, ensure_ascii=False))
+    tmp.replace(f)
+    return {m: cache[m] for m in mbids if m in cache}
+
+
+def recs_rows(a, lib, plays):
+    """Source "recs": recordings of artists similar to the ones I play most (ListenBrainz Radio), not owned and not
+    hidden. Each row says which seeds led to it; more seeds pointing at a recording rank it higher, then the seeds
+    take turns, each with its most listened recordings first. No year (LB has none for these); genre filter on recording tags, else artist tags."""
+    seeds = recs_seeds(lib, plays)
+    found = {}
+    for seed_mbid, seed_name, w in seeds:
+        recs = [r for similar, rs in lb_radio(seed_mbid).items() if similar != seed_mbid for r in rs]  # not the seed's own
+        recs.sort(key=lambda r: -(r.get("total_listen_count") or 0))
+        for turn, r in enumerate(recs):
+            x = found.setdefault(r["recording_mbid"], {"seeds": [], "weight": 0, "turn": turn,
+                                                       "listens": r.get("total_listen_count") or 0})
+            if seed_name not in x["seeds"]:
+                x["seeds"].append(seed_name)
+                x["weight"] += w
+                x["turn"] = min(x["turn"], turn)
+    meta = lb_metadata(list(found))
+    ok, hidden, rows = genre_filter(a.genre), hidden_set(), []
+    for mbid, x in found.items():
+        m = meta.get(mbid)
+        if not m:
+            continue
+        artist, title = m["artist"]["name"], m["recording"]["name"]
+        if musicdb.match(lib, None, mbid, artist, title, any_copy=True)[0]:
+            continue
+        key = hide_key(artist, title)
+        if key in hidden and not a.show_hidden:
+            continue
+        rec_tags = [t["tag"] for t in m.get("tag", {}).get("recording", []) if t.get("count", 0) >= 2]
+        art_tags = sorted(m.get("tag", {}).get("artist", []), key=lambda t: -t.get("count", 0))
+        tags = rec_tags or [t["tag"] for t in art_tags if t.get("genre_mbid")][:5]
+        if a.genre and not ok(tags):
+            continue
+        rows.append({"artist": artist, "title": title, "file": None, "year": 0, "years": [], "mbid": mbid,
+                     "tags": tags, "points": x["weight"], "peak": len(x["seeds"]), "listens": x["listens"], "turn": x["turn"],
+                     "hidden": key in hidden, "reason": "similar to " + ", ".join(x["seeds"][:3])})
+    # seeds take turns (each one's most listened first), so the most played artist doesn't fill the whole list
+    rows.sort(key=lambda s: (-s["peak"], s["turn"], -s["points"], s["artist"]))
+    for i, s in enumerate(rows, 1):
+        s["rank"], s["pct"], s["cohort"] = i, round(100 * i / len(rows), 1), len(rows)
+    top = parse_top(a.top)
+    return [s for s in rows if in_top(s["rank"], len(rows), top)] if top else rows[: a.n]
+
+
 def show(a):
     lib = musicdb.library()
     plays, *_ = musicdb.counted(musicdb.db(), lib)
@@ -310,7 +414,7 @@ def show(a):
         years = sorted({y for part in a.years.split(",") if part.strip()
                         for y in range_years(part.strip())})
         groups = [(a.years, years)]
-    elif a.source == "likes" and not a.decade:
+    elif a.source in ("likes", "recs") and not a.decade:
         groups = [("all years", [])]
     else:
         groups = [(d, decade_years(d)) for d in (DECADES if a.decade == "all" else [a.decade or sys.exit("give a decade or --years")])]
@@ -323,9 +427,12 @@ def show(a):
         plays_last = musicdb.counted(musicdb.db(), lib)
         plays, last = plays_last[0], plays_last[1]
         label = label.replace("Hits ", "Likes ", 1) + (" · by plays" if a.sort == "plays" else " · rediscover")
+    if a.source == "recs":
+        label = label.replace("Hits ", "Recommendations ", 1) + " · LB Radio, similar to your most played artists"
     print(f"# {label}   ✓ = in library, plays = your play count")
     for d, years in groups:
-        part = likes_rows(years, a, lib, plays, last) if a.source == "likes" else ranked(years, a, lib)
+        part = (likes_rows(years, a, lib, plays, last) if a.source == "likes" else recs_rows(a, lib, plays)
+                if a.source == "recs" else ranked(years, a, lib))
         if len(groups) > 1:
             print(f"\n## {d} (Billboard year-end {coverage(d)}): {sum(1 for s in part if s['file'])}/{len(part)} in library")
         print_rows(part, plays, a)
@@ -401,14 +508,15 @@ def write_json(a, label, rows, plays):
     out = {"version": 1, "generated_at": dt.datetime.now().isoformat(timespec="seconds"), "label": label,
            "args": {"period": a.years or a.decade, "top": a.top, "genre": a.genre, "owned": a.owned, "rank": a.rank,
                     "show_hidden": a.show_hidden, "source": a.source, "sort": a.sort},
-           "rank_note": ("rank by your plays among liked songs" if a.source == "likes" and a.sort == "plays"
+           "rank_note": ("more of your most played artists point to it; then they take turns" if a.source == "recs"
+                         else "rank by your plays among liked songs" if a.source == "likes" and a.sort == "plays"
                          else "liked, often played, not lately" if a.source == "likes"
                          else "best year-end chart position within the chosen years and genres"),
            "rows": [{"rank": s["rank"], "pct": s["pct"], "cohort": s["cohort"], "artist": s["artist"], "title": s["title"],
-                     "year": min(s["years"]), "years": s["years"], "points": s["points"], "peak": s["peak"],
+                     "year": min(s["years"], default=0), "years": s["years"], "points": s["points"], "peak": s["peak"],
                      "listens": s.get("listens", 0),
                      "genres": genres(s)[:5], "mbid": s.get("mbid"), "file": s["file"], "hidden": s.get("hidden", False),
-                     "plays": plays.get(s["file"], 0) if s["file"] else 0} for s in rows]}
+                     "plays": plays.get(s["file"], 0) if s["file"] else 0, "reason": s.get("reason")} for s in rows]}
     path = pathlib.Path(a.json).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -423,7 +531,8 @@ def print_rows(rows, plays, a):
         k = plays.get(s["file"], 0) if s["file"] else 0
         score = f"{s['listens']:>9,}" if a.rank == "listens" else f"{s['peak']:>4}"
         g = ", ".join(genres(s)[:3])
-        print(f"{s.get('rank', i):4d}.{'h' if s.get('hidden') else ' '}{have} {k or '':>4} {score}  {s['artist']} - {s['title']}  ({min(s['years'])}; {g})")
+        print(f"{s.get('rank', i):4d}.{'h' if s.get('hidden') else ' '}{have} {k or '':>4} {score}  {s['artist']} - {s['title']}  ({min(s['years'], default='?')}; {g})"
+              + (f"  [{s['reason']}]" if s.get("reason") else ""))
 
 
 def prefetch(a):
@@ -452,8 +561,9 @@ def main():
     ap.add_argument("--top", help='percent ranges of the ranking, e.g. "1-10" or "11-20,21-50" (instead of -n)')
     ap.add_argument("--json", metavar="PATH", help="also write the result as JSON (for rormpc's Hits pane)")
     ap.add_argument("--show-hidden", action="store_true", help="include songs hidden with `hits hide` (marked)")
-    ap.add_argument("--source", choices=["billboard", "likes"], default="billboard",
-                    help="billboard: US year-end charts; likes: your liked songs (rmpc like sticker)")
+    ap.add_argument("--source", choices=["billboard", "likes", "recs"], default="billboard",
+                    help="billboard: US year-end charts; likes: your liked songs (rmpc like sticker); "
+                         "recs: songs of artists similar to your most played ones (ListenBrainz Radio)")
     ap.add_argument("--sort", choices=["plays", "rediscover"], default="plays", help="order for --source likes")
     ap.add_argument("-n", type=int, default=100, help="how many (10/100/1000)")
     ap.add_argument("-g", "--genre", default="", help='e.g. "rock -country" or "hip hop, r&b"')

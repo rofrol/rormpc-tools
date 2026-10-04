@@ -12,7 +12,7 @@
 Per song: YouTube search (5 results) -> candidates filtered by duration (within 5 s of the chart recording on
 MusicBrainz) and version words (live, remix, cover, sped up, ...) unless the chart title has them -> download the
 best one into a staging dir outside the music dir -> identify it like yt-mp3-mb (MusicBrainz URL relation,
-AcoustID, ...). Only an exact match of the chart's recording MBID goes into <music>/Hits/<decade>s; anything else
+AcoustID, ...). Only an exact match of the chart's recording MBID goes into <music>/Hits/<decade>s (Recommendations/ when the row has no year); anything else
 waits in review with the reason ("other recording of the same song", "different song", "no match"). Tags are
 never changed to force agreement. Between songs the worker sleeps 8-20 s; it stops after 3 failures in a row or
 when YouTube answers 429.
@@ -154,7 +154,8 @@ def verify(item, row):
 
 
 def target_dir(item):
-    return MUSIC / "Hits" / f"{item['year'] // 10 * 10}s"
+    """Hits/<decade>s; recommendations have no year and go to Recommendations/."""
+    return MUSIC / "Hits" / f"{item['year'] // 10 * 10}s" if item.get("year") else MUSIC / "Recommendations"
 
 
 def fetch_one(item):
