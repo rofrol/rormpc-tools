@@ -5,6 +5,7 @@ rormpc's Hits pane.
   hits genres pin GENRE ...      # show it as a checkbox in the Hits filter column
   hits genres unpin GENRE ...
   hits genres pins [--json]
+  hits genres of FILE ... [--json] # one song's genres, where they came from, which are pinned
 
 A song's genres: its recording's MusicBrainz genres with at least 2 votes, else its artist's (also at least 2
 votes when any have that many), plus my corrections (`musicdb genre`). Unlike the Hits display there is no top-3
@@ -45,14 +46,20 @@ def voted(tags):
     return [t.get("name") or t.get("tag") for t in (strong or tags)]
 
 
-def index():
-    """[(file, plays, [genres], provenance)] for every library song."""
+def index(files=None):
+    """[(file, plays, [genres], provenance)] for every library song, or for the given files in that order (a file
+    MPD doesn't know is left out)."""
     from .hits import cached, lb_metadata
     from .musicdb import counted, db, library, mpd, one
     from .tags import effective_genres, manual_genres
-    m, lib = mpd(), library()
-    plays = counted(db(), lib)[0]
-    songs = [s for s in m.listallinfo() if s.get("file")]
+    m = mpd()
+    if files is None:
+        songs = [s for s in m.listallinfo() if s.get("file")]
+        lib = library()
+        plays = counted(db(), lib)[0]
+    else:
+        songs = [s for f in files for s in m.find("file", f)[:1]]
+        plays = {}
     meta = lb_metadata([one(s["musicbrainz_trackid"]) for s in songs if s.get("musicbrainz_trackid")])
     manual, aliases = manual_genres(), load_pins()["aliases"]
     out = []
@@ -70,6 +77,18 @@ def index():
         gs = effective_genres([aliases.get(g, g) for g in gs], s["file"], rec_mbid, manual)
         out.append((s["file"], plays.get(s["file"], 0), list(dict.fromkeys(gs)), how if gs else "unknown"))
     return out
+
+
+def cmd_of(a):
+    """`hits genres of FILE ...`: the genres rormpc's "Pin genre…" and playlist-name suggestions offer."""
+    pins = set(load_pins()["pins"])
+    songs = [{"file": f, "genres": gs, "source": how, "pinned": [g for g in gs if g in pins]}
+             for f, _plays, gs, how in index(a.files)]
+    if a.json:
+        print(json.dumps({"version": 1, "songs": songs}, ensure_ascii=False)); return
+    for s in songs:
+        gs = ", ".join(f"{g} (pinned)" if g in pins else g for g in s["genres"]) or "no genre"
+        print(f"{s['file']}: {gs}  [{s['source']}]")
 
 
 def cmd_list(a):
@@ -102,6 +121,12 @@ def cmd_pin(a, pin):
 
 
 def main(argv):
+    if argv and argv[0] == "of":
+        ap = argparse.ArgumentParser(prog="hits genres of")
+        ap.add_argument("cmd")
+        ap.add_argument("--json", action="store_true")
+        ap.add_argument("files", nargs="+")
+        return cmd_of(ap.parse_args(argv))
     if argv and argv[0] in ("pin", "unpin", "pins"):
         ap = argparse.ArgumentParser(prog=f"hits genres {argv[0]}")
         ap.add_argument("cmd")
