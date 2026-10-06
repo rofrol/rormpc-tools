@@ -54,6 +54,9 @@ def env(tmp_path, monkeypatch):
                         "LB_CUTOFF": "2026-01-01T00:00:00"}.items():
         monkeypatch.setattr(musicdb, name, value)
     monkeypatch.setattr(musicdb, "LB_PAUSED", [False])
+    from rormpc_tools import identity
+    identity._cache.clear()
+    monkeypatch.setattr(identity, "TAG_CACHE", tmp_path / "identity-tags.json")
     holder = {}
 
     def install(songs=()):

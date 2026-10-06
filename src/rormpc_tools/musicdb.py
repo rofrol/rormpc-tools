@@ -21,6 +21,7 @@
   musicdb tag add|remove|list|of ...   # hand-made lists (God, melancholic, ...); musicdb tag --help
   musicdb genre add|exclude|reset GENRE --current   # correct a song's MusicBrainz genres
   musicdb chart [--bucket month] [--open]  # HTML page: how my most played songs rose and fell
+  musicdb identity sync|show FILE       # one id per library file (songs.jsonl + tags), follows renames
   musicdb versions --help               # which file a played track is, when several files share its name
   musicdb dedupe [--apply]              # one file per identical audio stream: state merged, copies quarantined
   musicdb doctor [--json] [-v]          # silent data errors: duplicate listens, songs in several files, paths
@@ -44,7 +45,7 @@ Needs sticker_file in mpd.conf.
 """
 import argparse, collections, contextlib, datetime as dt, fcntl, json, os, pathlib, re, shutil, sqlite3, subprocess, sys, time, urllib.request, zipfile, zoneinfo
 
-from . import mbtag, settings
+from . import identity, mbtag, settings
 
 DB = settings.DB_FILE
 DATA = settings.DATA_DIR
@@ -58,7 +59,6 @@ LISTENS_LOG = settings.LISTENS_LOG
 LB_OVERLAP_S = 7 * 86400
 SKIPPED_MIN = 2  # skips since the last play that put a song into the "Skipped" playlist
 YT_DEDUP_S = 300  # repeated Takeout entries of the same video within 5 min = one play
-YTID_IN_NAME = re.compile(r"--([\w-]{11})--\d{8}\.mp3$")
 # zone of the stored (naive) timestamps; None: the system's. See settings.HISTORY_TZ.
 TZ = zoneinfo.ZoneInfo(settings.HISTORY_TZ) if settings.HISTORY_TZ else None
 
@@ -141,7 +141,7 @@ def export(_a):
             json.dumps({k: v for k, v in zip(cols, r) if v not in ("", None)}, ensure_ascii=False) + "\n" for r in rows))
     git = lambda *a: subprocess.run(["git", "-C", str(DATA), *a], capture_output=True, text=True)
     # the hand-written logs (tag lists, manual genres, hidden hits) are committed with the hourly export
-    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl", "likes.jsonl", "aliases.jsonl", "versions.jsonl")
+    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl", "likes.jsonl", "aliases.jsonl", "versions.jsonl", "songs.jsonl")
             if (DATA / f).exists()]
     git("add", "events.jsonl", "favorites.jsonl", "tombstones.jsonl", "skips.jsonl", "deletions", *logs)
     if git("diff", "--cached", "--quiet").returncode:
@@ -216,8 +216,8 @@ def import_mpdlog(_a):
                  "ListenBrainz listens too and would count twice")
     durs = {}
     for s in mpd().listallinfo():
-        if "file" in s and (m := YTID_IN_NAME.search(s["file"])):
-            durs[m.group(1)] = float(one(s.get("duration", 0)) or 0)
+        if "file" in s and (y := identity.ytid(s["file"])):
+            durs[y] = float(one(s.get("duration", 0)) or 0)
     lines = MPD_LOG.read_text(errors="replace").splitlines()
     # (second, file) of decode failures: MPD logs "played" for files it could not open, too
     failed = {(l[:19], re.search(r'Failed to decode "([^"]+)"', l).group(1).rsplit("/", 1)[-1]) for l in lines if "Failed to decode" in l}
@@ -231,12 +231,12 @@ def import_mpdlog(_a):
         prev = ts
         if m.group(1) >= LB_CUTOFF or (m.group(1), f.rsplit("/", 1)[-1]) in failed:
             continue
-        y = YTID_IN_NAME.search(f)
-        dur = durs.get(y.group(1), 0) if y else 0
+        y = identity.ytid(f)
+        dur = durs.get(y, 0) if y else 0
         # the line is logged when the song ends; the previous one marks (roughly) when it started
         if gap < 30 or (dur and gap < min(dur / 2, 240)):
             continue
-        rows.append(("mpd", m.group(1), y.group(1) if y else None, None, None, None, f, None, None))
+        rows.append(("mpd", m.group(1), y, None, None, None, f, None, None))
     add_events(rows)
 
 
@@ -280,8 +280,7 @@ def import_local(_a):
     listens come back from ListenBrainz with the same timestamp; counted() counts them once."""
     rows = []
     for r in jsonl(LISTENS_LOG):
-        y = YTID_IN_NAME.search(r["file"])
-        rows.append(("local", local_ts(r["ts"]), y.group(1) if y else None,
+        rows.append(("local", local_ts(r["ts"]), identity.ytid(r["file"]),
                      r.get("mbid"), None, None, None, None, json.dumps({"file": r["file"]})))
     add_events(rows)
 
@@ -461,8 +460,8 @@ def library():
         f = s.get("file")
         if not f:
             continue
-        if m := YTID_IN_NAME.search(f):
-            by_yt[m.group(1)] = f
+        if y := identity.ytid(f):
+            by_yt[y] = f
         if s.get("musicbrainz_trackid"):
             by_mbid[one(s["musicbrainz_trackid"])] = f
         a, t = one(s.get("artist", "")), one(s.get("title", ""))
@@ -685,6 +684,10 @@ def update(a):
         print(f"ListenBrainz: paused after {st['failures']} failed runs, next try after "
               f"{dt.datetime.fromtimestamp(st['next']).strftime('%H:%M')}")
     deletions(argparse.Namespace(retry=True, json=False))
+    rep = identity.sync()  # new downloads get an id, renamed files keep theirs
+    print(identity.summary(rep))
+    if rep["tagged"]:
+        identity.subprocess_update()
     import_skips(a)
     import_local(a)
     if not LB_PAUSED[0]:
@@ -797,9 +800,8 @@ def describe(rel, rows, lib, m):
     files = library_files(lib)
     prepare(lib, files)
     info = (m.find("file", rel) or [{}])[0]
-    y = YTID_IN_NAME.search(rel)
     return {"file": rel, "artist": one(info.get("artist", "")), "title": one(info.get("title", pathlib.Path(rel).stem)),
-            "ytid": y.group(1) if y else None, "mbid": next((x for x, f in lib[1].items() if f == rel), None),
+            "ytid": identity.ytid(rel), "mbid": next((x for x, f in lib[1].items() if f == rel), None),
             "events": [dict(zip(EVENT_COLS, r)) for r in rows
                        if event_file(lib, files, r[0], r[2], r[3], r[5], r[6], r[8], r[4]) == rel]}
 
@@ -1082,7 +1084,7 @@ def deletions(a):
 def name_title(rel):
     """The video title in a downloaded file name (NNN--Channel--Title--ytid--YYYYMMDD.mp3), else the stem."""
     parts = pathlib.Path(rel).stem.split("--")
-    if YTID_IN_NAME.search(pathlib.Path(rel).name) and len(parts) >= 4:
+    if identity.ytid_from_name(rel) and len(parts) >= 4:
         return "--".join(parts[2:-2] or parts[1:-2]).replace("_", " ")
     return pathlib.Path(rel).stem
 
@@ -1131,6 +1133,8 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "chart":
         from . import chart
         return chart.main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "identity":
+        return identity.main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "versions":
         from . import versions
         return versions.main(sys.argv[2:])

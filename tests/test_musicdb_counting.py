@@ -198,6 +198,8 @@ def test_update_backs_off_listenbrainz_and_keeps_the_local_steps(env, monkeypatc
     monkeypatch.setattr(musicdb, "push_feedback", lambda c, s: calls.append("push") or 0)
     monkeypatch.setattr(musicdb, "youtube_index_daily", lambda: None)
     monkeypatch.setattr(musicdb, "deletions", lambda a: None)
+    from rormpc_tools import identity
+    monkeypatch.setattr(identity, "sync", lambda *a, **k: {"new": [], "renamed": [], "gone": [], "tagged": [], "conflicts": []})
     musicdb.LISTENS_LOG.write_text(json.dumps({"ts": 1790000000, "file": RICK, "mbid": "mb-rick"}) + "\n")
     with pytest.raises(SystemExit):
         musicdb.update(None)

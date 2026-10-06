@@ -102,6 +102,7 @@ def test_markers_read_file_names_with_underscores():
 def test_update_leaves_a_doctor_summary_for_rormpc(env, monkeypatch, tmp_path):
     env(SONGS)
     monkeypatch.setattr(doctor, "SUMMARY", tmp_path / "doctor.json")
+    monkeypatch.setattr(doctor, "identity_problems", lambda files: [])  # no audio files here; see test_identity
     musicdb.add_events([spotify("2015-01-01T10:00:00")])
     assert doctor.write_summary().startswith("doctor: ambiguous-names 1")
     s = json.loads((tmp_path / "doctor.json").read_text())

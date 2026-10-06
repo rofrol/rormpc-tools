@@ -7,6 +7,8 @@ Checks:
   shared-ids        a YouTube id or recording MBID in several library files: its plays go to one copy only
                     (`musicdb versions shared-ok ID` when that is right, else fix the wrong tag)
   ambiguous-names   plays matched by name to several files and not decided, so credited to none
+  identity          files without a registry id (musicdb identity sync), ids missing from the file's tags or
+                    disagreeing with them, a name's YouTube id disagreeing with the registry, live rows whose file is gone
   versions-open     `musicdb versions`: undecided tracks, unlabelled files sharing a name, decisions whose
                     file is gone or whose group changed since (a download, a deletion)
   local-orphans     scrobbler listens whose file is gone and that no YouTube id or MBID finds again
@@ -17,7 +19,7 @@ deleted with `musicdb delete`, the only finding that is safe to repair without a
 """
 import argparse, collections, datetime as dt, json, sys
 
-from . import musicdb, settings, tags, versions
+from . import identity, musicdb, settings, tags, versions
 
 
 def check():
@@ -31,8 +33,8 @@ def check():
 
     ids = collections.defaultdict(set)
     for s in songs:
-        if y := musicdb.YTID_IN_NAME.search(s["file"]):
-            ids[f"yt:{y.group(1)}"].add(s["file"])
+        if y := identity.ytid(s["file"]):
+            ids[f"yt:{y}"].add(s["file"])
         if mb := musicdb.one(s.get("musicbrainz_trackid", "")):
             ids[f"mb:{mb}"].add(s["file"])
     ok = versions.fold()["shared"]
@@ -62,6 +64,7 @@ def check():
     out["ambiguous-names"] = [{"artist": a, "title": t, "plays": n,
                                "files": sorted(lib[2][musicdb.name_key(a, t)])} for (a, t), n in ambiguous.most_common()]
     out["local-orphans"] = orphans
+    out["identity"] = identity_problems(sorted(files))
     out["versions-open"] = [{"name": g["name"], "open": g["pending"]} for g in versions.groups()]
 
     stale, al, gone = [], musicdb.aliases(), deleted()
@@ -90,6 +93,27 @@ def check():
     out["accounting"] = {"events": total, "credited": credited, "unmatched": unmatched, "lb-copy-of-local": dup,
                          "ok": total == credited + unmatched + dup}
     return out
+
+
+def identity_problems(files):
+    reg, problems = identity.load(fresh=True), []
+    tags = identity.cached_tags(files)
+    for f in files:
+        r = identity.resolve(f)
+        if not r or r.get("path") != f:
+            problems.append({"file": f, "why": "not registered"})
+            continue
+        sid, tag_yt = tags.get(f, (None, None))
+        name_yt = identity.ytid_from_name(f)
+        if sid != r["id"]:
+            problems.append({"file": f, "why": "id missing from the tags" if not sid else f"tags carry id {sid}"})
+        for what, yt in (("tag", tag_yt), ("name", name_yt)):
+            if yt and r.get("ytid") and yt != r["ytid"]:
+                problems.append({"file": f, "why": f"{what} says YouTube id {yt}, registry {r['ytid']}"})
+    live = set(files)
+    problems += [{"file": r["path"], "why": "registry says live, MPD has no such file"}
+                 for r in reg["rows"].values() if r.get("state") == "live" and r.get("path") not in live]
+    return problems
 
 
 def deleted():

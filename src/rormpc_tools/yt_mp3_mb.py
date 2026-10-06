@@ -14,7 +14,7 @@ Uncertain matches are asked about interactively; decisions are logged to ~/.cach
 """
 import argparse, json, pathlib, re, shutil, subprocess, sys, tempfile
 
-from . import mbtag, settings
+from . import identity, mbtag, settings
 
 MUSIC = settings.MUSIC_DIR
 LOG = mbtag.CACHE / "log.jsonl"
@@ -131,10 +131,11 @@ def main():
             t = ID3(f)
             g = lambda k: str(t.get(k)) if t.get(k) else ""
             url = g("TXXX:purl") or g("TXXX:comment")
-            m = re.search(r"v=([\w-]{11})", url) or re.search(r"--([\w-]{11})--\d{8}\.mp3$", f.name)
+            m = re.search(r"v=([\w-]{11})", url)
+            yt = m.group(1) if m else identity.ytid_from_name(f.name)
             date = re.search(r"--(\d{8})\.mp3$", f.name)
             idx = re.match(r"(\d+)--", f.name)
-            info = {"id": m.group(1), "channel": g("TXXX:YouTube Channel") or g("TPE1"), "title": g("TIT2"),
+            info = {"id": yt, "channel": g("TXXX:YouTube Channel") or g("TPE1"), "title": g("TIT2"),
                     "description": g("TXXX:description"), "duration": MP3(f).info.length,
                     "upload_date": date.group(1) if date else "", "playlist_index": idx.group(1) if idx else None}
             process(f, info, f.parent, a.yes)

@@ -15,11 +15,10 @@ MPD playlist "Tag NAME" (playing it is up to you; nothing is queued). Names are 
 """
 import argparse, collections, datetime as dt, fcntl, json, re, subprocess, sys
 
-from . import settings
+from . import identity, settings
 
 LISTS = settings.DATA_DIR / "collections.jsonl"
 GENRES = settings.DATA_DIR / "genres.jsonl"
-YTID = re.compile(r"--([\w-]{11})--\d{8}\.mp3$")
 
 
 def norm_name(name, known=()):
@@ -32,10 +31,8 @@ def song_ref(m, rel):
     """Identity and description of a library file."""
     t = (m.find("file", rel) or [{}])[0]
     one = lambda k: (t.get(k)[0] if isinstance(t.get(k), list) else t.get(k)) or ""
-    y = YTID.search(rel)
     mbid = one("musicbrainz_trackid")
-    key = f"yt:{y.group(1)}" if y else f"mb:{mbid}" if mbid else f"file:{rel}"
-    return {"key": key, "file": rel, "ytid": y.group(1) if y else None, "mbid": mbid or None,
+    return {"key": identity.key(rel, mbid), "file": rel, "ytid": identity.ytid(rel), "mbid": mbid or None,
             "artist": one("artist"), "title": one("title")}
 
 
@@ -75,8 +72,7 @@ def manual_genres():
 
 def key_of_file(rel, mbid=None):
     """Song key from what `hits` knows about a library row (no MPD round trip)."""
-    y = YTID.search(rel or "")
-    return f"yt:{y.group(1)}" if y else f"mb:{mbid}" if mbid else f"file:{rel}"
+    return identity.key(rel or "", mbid)
 
 
 def effective_genres(genres, rel, mbid=None, manual=None):

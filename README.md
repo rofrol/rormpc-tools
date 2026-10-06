@@ -74,6 +74,12 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   `hits.hide_key`): don't add another normalisation. A name shared by several files is credited to none.
 - MPD keys stickers by path: `sync` snapshots like stickers with the song's YouTube id and MBID into
   `likes.jsonl` in data_dir, so a move or rename can put them back.
+- Every library file has an id (a UUID of the file, not of a song): `songs.jsonl` in data_dir is the registry
+  (current path, every old path, YouTube id, MBID, audio hash, live/gone/merged), and the id plus the YouTube id
+  are also in the file's tags (MP3 TXXX "rormpc Song ID" / "YouTube ID", FLAC RORMPC_SONG_ID / YOUTUBE_ID), so
+  `musicdb identity sync` (hourly in `update`) recognises a file renamed or moved by anything. MPD does not show
+  custom tags: tools ask `identity.ytid(path)` / `identity.key(path)`, never parse file names; the name pattern
+  lives only in identity.py (a test enforces it). A copy carrying the same id is reported, never merged.
 - Merged or moved files are recorded in `aliases.jsonl` in data_dir (old path -> current path); history and
   logs keep the path they were written with and readers map it through `musicdb.canon()`. `musicdb dedupe`
   keeps one file per identical audio stream and writes these aliases.

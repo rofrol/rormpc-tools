@@ -178,9 +178,8 @@ def canon_all(fs, al):
 
 
 def musicdb_key(f, s):
-    y = musicdb.YTID_IN_NAME.search(f)
-    mb = musicdb.one(s.get("musicbrainz_trackid", ""))
-    return f"yt:{y.group(1)}" if y else f"mb:{mb}" if mb else f"file:{f}"
+    from . import identity
+    return identity.key(f, musicdb.one(s.get("musicbrainz_trackid", "")) or None)
 
 
 LEN_SLACK_S = 8  # a file a few seconds longer or shorter than the longest play (silence, fades) still fits
