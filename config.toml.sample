@@ -22,5 +22,9 @@
 # Empty: ListenBrainz only, and `musicdb import-mpdlog` refuses to run. [LB_CUTOFF]
 #lb_since = "2026-01-01T00:00:00"
 
+# Time zone of the play history (IANA name). Empty: the system's; set it if this computer ever changes zones,
+# or a listen re-imported in another zone is stored and counted twice. [MUSICDB_TZ]
+#history_timezone = "Europe/Warsaw"
+
 # Contact in the User-Agent that MusicBrainz asks for: your e-mail or a URL [RORMPC_TOOLS_CONTACT]
 #contact = "https://github.com/rofrol/rormpc-tools"

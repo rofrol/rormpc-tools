@@ -21,6 +21,8 @@
   musicdb tag add|remove|list|of ...   # hand-made lists (God, melancholic, ...); musicdb tag --help
   musicdb genre add|exclude|reset GENRE --current   # correct a song's MusicBrainz genres
   musicdb chart [--bucket month] [--open]  # HTML page: how my most played songs rose and fell
+  musicdb doctor [--json] [-v]          # silent data errors: duplicate listens, songs in several files, paths
+                                        # that no longer exist, plays credited to no file (read-only)
   musicdb lyrics --help             # lyrics from LRCLIB into lyrics_dir (rmpc's Lyrics pane)
   musicdb deletions [--json [--all]] [--retry]  # the deletion journal (--all adds finished permanent deletions);
                                                 # --retry runs failed remote steps (update does it)
@@ -38,7 +40,7 @@ Source of truth: JSONL in data_dir (settings; committed when it is a git reposit
 db_file is a cache rebuilt from it when missing.
 Needs sticker_file in mpd.conf.
 """
-import argparse, collections, contextlib, datetime as dt, fcntl, json, os, pathlib, re, shutil, sqlite3, subprocess, sys, time, urllib.request, zipfile
+import argparse, collections, contextlib, datetime as dt, fcntl, json, os, pathlib, re, shutil, sqlite3, subprocess, sys, time, urllib.request, zipfile, zoneinfo
 
 from . import mbtag, settings
 
@@ -55,6 +57,20 @@ LB_OVERLAP_S = 7 * 86400
 SKIPPED_MIN = 2  # skips since the last play that put a song into the "Skipped" playlist
 YT_DEDUP_S = 300  # repeated Takeout entries of the same video within 5 min = one play
 YTID_IN_NAME = re.compile(r"--([\w-]{11})--\d{8}\.mp3$")
+# zone of the stored (naive) timestamps; None: the system's. See settings.HISTORY_TZ.
+TZ = zoneinfo.ZoneInfo(settings.HISTORY_TZ) if settings.HISTORY_TZ else None
+
+
+def local_ts(when):
+    """Stored timestamp ("2026-09-26T02:16:18", the history's zone) of a Unix time or an aware datetime."""
+    d = dt.datetime.fromtimestamp(when, TZ) if isinstance(when, (int, float)) else when.astimezone(TZ)
+    return d.replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def epoch_of(ts):
+    """Unix time of a stored timestamp (the inverse of local_ts)."""
+    d = dt.datetime.fromisoformat(ts)
+    return (d.replace(tzinfo=TZ) if TZ else d).timestamp()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -107,7 +123,7 @@ def export(_a):
             json.dumps({k: v for k, v in zip(cols, r) if v not in ("", None)}, ensure_ascii=False) + "\n" for r in rows))
     git = lambda *a: subprocess.run(["git", "-C", str(DATA), *a], capture_output=True, text=True)
     # the hand-written logs (tag lists, manual genres, hidden hits) are committed with the hourly export
-    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl")
+    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl", "likes.jsonl")
             if (DATA / f).exists()]
     git("add", "events.jsonl", "favorites.jsonl", "tombstones.jsonl", "skips.jsonl", "deletions", *logs)
     if git("diff", "--cached", "--quiet").returncode:
@@ -137,13 +153,37 @@ def add_events(rows):
     # '' instead of NULL: SQLite never treats NULLs as equal, so UNIQUE would not dedupe re-imports
     # a re-import may fill `extra` (e.g. the ListenBrainz msid) of an event stored before it was recorded
     dead = set(c.execute(f"SELECT {KEY} FROM tombstones"))
-    rows = [r for r in rows if tuple("" if v is None else v for v in r[:7]) not in dead]
+    dead_lb = {(ts, a, t) for ts, a, t in c.execute("SELECT ts, artist, title FROM tombstones WHERE source = 'lb'")}
+    rows = [r for r in rows if tuple("" if v is None else v for v in r[:7]) not in dead
+            and not (r[0] == "lb" and (r[1], r[5] or "", r[6] or "") in dead_lb)]
     c.executemany("INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?) "
                   "ON CONFLICT(source, ts, ytid, mbid, spotify_uri, artist, title) DO UPDATE SET extra = excluded.extra "
                   "WHERE events.extra = '' AND excluded.extra != ''",
                   [tuple("" if v is None else v for v in r) for r in rows])
+    merged = merge_lb_copies(c)
     c.commit()
-    print(f"{c.total_changes - before} new events ({len(rows)} read)")
+    print(f"{c.total_changes - before - merged} new events ({len(rows)} read)" + (f", {merged} duplicate listens merged" if merged else ""))
+
+
+def merge_lb_copies(c):
+    """One ListenBrainz listen is one event. Its identity is (second, artist, title): the MBID is not, because
+    ListenBrainz maps a listen to a recording later, so a re-read in the import overlap brings the same listen
+    back with an MBID (and msid) the stored copy lacks, and the UNIQUE key saw two events. Keeps the copy with
+    the most information, fills its missing fields from the others, deletes the rest. Returns rows changed."""
+    n = 0
+    groups = c.execute("SELECT ts, artist, title FROM events WHERE source = 'lb' "
+                       "GROUP BY ts, artist, title HAVING count(*) > 1").fetchall()
+    for ts, artist, title in groups:
+        rows = c.execute("SELECT rowid, mbid, extra, ms_played FROM events WHERE source = 'lb' AND ts = ? AND artist = ? "
+                         "AND title = ? ORDER BY (extra != '') DESC, (mbid != '') DESC, rowid", (ts, artist, title)).fetchall()
+        keep, rest = rows[0], rows[1:]
+        mbid = keep[1] or next((r[1] for r in rest if r[1]), "")
+        extra = keep[2] or next((r[2] for r in rest if r[2]), "")
+        ms = keep[3] if keep[3] not in ("", None) else next((r[3] for r in rest if r[3] not in ("", None)), "")
+        c.executemany("DELETE FROM events WHERE rowid = ?", [(r[0],) for r in rest])
+        c.execute("UPDATE events SET mbid = ?, extra = ?, ms_played = ? WHERE rowid = ?", (mbid, extra, ms, keep[0]))
+        n += len(rest) + 1
+    return n
 
 
 def one(x):
@@ -185,10 +225,10 @@ def import_mpdlog(_a):
 def import_lb(_a):
     """Listens since LB_CUTOFF (pages are newest first, so stop at the first older one).
     Any failed or malformed page raises: a silent partial import would look like success."""
-    cutoff = dt.datetime.fromisoformat(LB_CUTOFF).timestamp() if LB_CUTOFF else 0
+    cutoff = epoch_of(LB_CUTOFF) if LB_CUTOFF else 0
     newest = db().execute("SELECT max(ts) FROM events WHERE source = 'lb'").fetchone()[0]
     if newest:  # only what is new since the last import
-        cutoff = max(cutoff, dt.datetime.fromisoformat(newest).timestamp() - LB_OVERLAP_S)
+        cutoff = max(cutoff, epoch_of(newest) - LB_OVERLAP_S)
     user = mbtag.lb_user()
     rows, max_ts = [], None
     while True:
@@ -206,7 +246,7 @@ def import_lb(_a):
             if ai.get("submission_client") == "musicdb-spotify-import":
                 continue  # already in the DB as source "spotify"
             mbid = ai.get("recording_mbid") or (tm.get("mbid_mapping") or {}).get("recording_mbid")
-            ts = dt.datetime.fromtimestamp(l["listened_at"]).isoformat()
+            ts = local_ts(l["listened_at"])
             # recording_msid identifies the listen on LB: needed to map or delete it later
             rows.append(("lb", ts, None, mbid, None, tm.get("artist_name"), tm.get("track_name"), ai.get("duration_ms"),
                          json.dumps({"msid": l.get("recording_msid")})))
@@ -223,13 +263,13 @@ def import_local(_a):
     rows = []
     for r in jsonl(LISTENS_LOG):
         y = YTID_IN_NAME.search(r["file"])
-        rows.append(("local", dt.datetime.fromtimestamp(r["ts"]).isoformat(), y.group(1) if y else None,
+        rows.append(("local", local_ts(r["ts"]), y.group(1) if y else None,
                      r.get("mbid"), None, None, None, None, json.dumps({"file": r["file"]})))
     add_events(rows)
 
 
 def import_skips(_a):
-    rows = [(dt.datetime.fromtimestamp(r["ts"]).isoformat(), r["file"], r.get("mbid") or "", r.get("position_s"),
+    rows = [(local_ts(r["ts"]), r["file"], r.get("mbid") or "", r.get("position_s"),
              r.get("duration_s"), r.get("run_s")) for r in jsonl(SKIPS_LOG)]
     c = db()
     before = c.total_changes
@@ -343,7 +383,7 @@ def import_takeout(a):
         m = re.search(r"[?&]v=([\w-]{11})", it.get("titleUrl", ""))
         if not m:
             continue
-        ytid, ts = m.group(1), dt.datetime.fromisoformat(it["time"].replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+        ytid, ts = m.group(1), dt.datetime.fromisoformat(local_ts(dt.datetime.fromisoformat(it["time"].replace("Z", "+00:00"))))
         if ytid in last and (ts - last[ytid]).total_seconds() < YT_DEDUP_S:
             continue
         last[ytid] = ts
@@ -361,7 +401,7 @@ def import_spotify(a):
             if "ts" in e:  # extended history
                 if not e.get("master_metadata_track_name") or (e.get("ms_played") or 0) < 30000:
                     continue
-                ts = dt.datetime.fromisoformat(e["ts"].replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+                ts = dt.datetime.fromisoformat(local_ts(dt.datetime.fromisoformat(e["ts"].replace("Z", "+00:00"))))
                 rows.append(("spotify", ts.isoformat(timespec="seconds"), None, None, e.get("spotify_track_uri"),
                              e.get("master_metadata_album_artist_name"), e["master_metadata_track_name"], e["ms_played"], None))
             elif e.get("msPlayed", 0) >= 30000:  # basic "StreamingHistory_music" export
@@ -414,8 +454,8 @@ def library():
 
 def name_key(artist, title):
     title = re.sub(r"\s*[\(\[].*?[\)\]]", "", title or "")  # "(radio edit)", "[Remastered]" -> same song
-    artist = re.split(r"\s+(?:feat\.?|ft\.?|featuring|&|,|x|vs\.?)\s+", mbtag.norm(artist or ""))[0]
-    return f"{artist}|{mbtag.norm(title)}"
+    # main artist before norm(): norm() drops "feat" and "&", so splitting after it never finds the main artist
+    return f"{mbtag.norm(mbtag.main_artist(artist))}|{mbtag.norm(title)}"
 
 
 def match(lib, ytid=None, mbid=None, artist=None, title=None, any_copy=False):
@@ -511,12 +551,30 @@ def sync(_a):
             elif key in have:
                 m.sticker_delete("song", f, key)
             n += 1
+    write_likes(m, files)
     sent = push_feedback(c, {mbid: max(scores) for mbid, scores in likes.items()})  # duplicates: a like wins
     print(f"{len(files)} songs, {sum(1 for f in files if plays.get(f))} with plays, "
           f"{sum(1 for v in likes.values() if max(v) == 1)} liked, {n} sticker updates, {sent} LB feedback sent, "
           f"{write_skipped_playlist(collections.Counter({f: k for f, k in skips.items() if f in files}))} in playlist Skipped, "
           f"{len(candidates)} in Not finished")
     write_playlist("Not finished", candidates)
+
+
+def write_likes(m, files):
+    """Snapshot of rmpc's like stickers into the data repo. MPD keys stickers by path, so a move or rename of
+    the library (or a lost sticker DB) would drop them silently; this keeps them with the song's identity
+    (YouTube id, MBID) to put them back."""
+    from . import tags
+    rows = []
+    for f in sorted(files):
+        try:
+            like = m.sticker_list("song", f).get("like")
+        except Exception:
+            continue
+        if like is not None:
+            rows.append(tags.song_ref(m, f) | {"like": like})
+    if DATA.exists():
+        write_jsonl(DATA / "likes.jsonl", rows)
 
 
 def push_feedback(c, scores):
@@ -570,7 +628,7 @@ def lb_import_spotify(a):
         ai = {"music_service": "spotify.com", "submission_client": "musicdb-spotify-import", "ms_played": ms}
         if uri and uri.startswith("spotify:track:"):
             ai["spotify_id"] = "https://open.spotify.com/track/" + uri.rsplit(":", 1)[-1]
-        listens.append({"listened_at": int(dt.datetime.fromisoformat(ts).timestamp()),
+        listens.append({"listened_at": int(epoch_of(ts)),
                         "track_metadata": {"artist_name": artist, "track_name": title, "additional_info": ai}})
     print(f"{len(listens)} Spotify plays, {listens[0]['listened_at'] if listens else '-'} .. {listens[-1]['listened_at'] if listens else '-'}")
     if a.dry_run:
@@ -783,7 +841,7 @@ def finish(r):
                     if f"{e['ts']} {msid}" in gone:
                         continue
                     req = urllib.request.Request("https://api.listenbrainz.org/1/delete-listen", method="POST",
-                                                 data=json.dumps({"listened_at": int(dt.datetime.fromisoformat(e["ts"]).timestamp()),
+                                                 data=json.dumps({"listened_at": int(epoch_of(e["ts"])),
                                                                   "recording_msid": msid}).encode(),
                                                  headers={"Authorization": "Token " + token, "Content-Type": "application/json",
                                                           "User-Agent": mbtag.UA})
@@ -987,6 +1045,9 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "chart":
         from . import chart
         return chart.main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        from . import doctor
+        return doctor.main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "lyrics":
         from . import lyrics
         return lyrics.main(sys.argv[2:])

@@ -66,5 +66,15 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   once; it is kept because deleting the history needs its msid. `import-lb` reads only what is new (7 days of
   overlap for listens the scrobbler's offline cache submits late), and a failed `import-lb` no longer stops
   `update` from syncing.
+- One ListenBrainz listen is one event, identified by (second, artist, title), not by MBID: LB maps listens to
+  recordings later, and a re-read copy with the new MBID is merged into the stored one (`merge_lb_copies`).
+- Stored timestamps are naive local time in `history_timezone` (default: the system zone); convert only through
+  `local_ts` / `epoch_of`, never `fromtimestamp` / `.timestamp()` directly, or a zone change double counts.
+- Every tool's "same song" by name goes through `mbtag.main_artist` + `mbtag.norm` (`musicdb.name_key`,
+  `hits.hide_key`): don't add another normalisation. A name shared by several files is credited to none.
+- MPD keys stickers by path: `sync` snapshots like stickers with the song's YouTube id and MBID into
+  `likes.jsonl` in data_dir, so a move or rename can put them back.
+- `musicdb doctor` lists silent data errors (duplicate listens, a song in several files, plays credited to no
+  file, paths that no longer exist); run it after anything that changes history or moves files.
 - Personal data (play history, exports, OAuth secrets, account names) never goes into this repository: it is
   public. Paths and accounts come from the settings, with defaults that assume nothing about the user.

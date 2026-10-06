@@ -44,5 +44,9 @@ SCROBBLER_DIR = _path("scrobbler_dir", "MUSICDB_SCROBBLER_DIR",
                       (HOME / "Library/Application Support" if sys.platform == "darwin" else XDG_DATA) / "listenbrainz-mpd")
 LISTENS_LOG = SCROBBLER_DIR / "listens.jsonl"
 SKIPS_LOG = SCROBBLER_DIR / "skips.jsonl"
+# time zone of the play history's timestamps (naive local time), e.g. "Europe/Warsaw"; empty: the system's.
+# Set it when the computer may change zones: re-imports compare timestamps as text, so a listen read in another
+# zone would be stored and counted a second time, and ListenBrainz deletions would name the wrong second.
+HISTORY_TZ = _get("history_timezone", "MUSICDB_TZ", None)
 # contact in the User-Agent that MusicBrainz asks for: an e-mail or URL
 CONTACT = _get("contact", "RORMPC_TOOLS_CONTACT", "https://github.com/rofrol/rormpc-tools")

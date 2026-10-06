@@ -96,8 +96,7 @@ def cached(name, fn):
     return r
 
 
-def main_artist(artist):
-    return re.split(r"\s+(?:featuring|feat\.?|ft\.?|with|and|&|x|vs\.?)\s+|,\s*", artist, flags=re.I)[0].strip()
+main_artist = mbtag.main_artist
 
 
 def mb_song(title, artist, year):

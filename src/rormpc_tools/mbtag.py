@@ -235,8 +235,15 @@ def collect(path, ytid, channel, title, desc, duration, yt_artist=None, yt_track
 VERSION_WORDS = re.compile(r"\b(remix|mix|edit|live|acoustic|cover|instrumental|extended|stripped|version|dub|karaoke|sped|slowed|mashup)\b", re.I)
 
 
+def main_artist(artist):
+    """First credited artist: "A feat. B", "A & B", "A, B", "A x B" -> "A". The one definition every tool uses
+    for "same song" (musicdb plays, hits ownership and hides), so they cannot disagree."""
+    return re.split(r"\s+(?:featuring|feat\.?|ft\.?|with|and|&|x|vs\.?)\s+|,\s*", artist or "", flags=re.I)[0].strip()
+
+
 def norm(s):
-    s = unicodedata.normalize("NFKD", fix(s).lower())
+    # ł has no decomposition: without this "Łódź" becomes "odz"
+    s = unicodedata.normalize("NFKD", fix(s).lower().replace("ł", "l"))
     s = "".join(c for c in s if not unicodedata.combining(c))
     s = re.sub(r"\b(the|feat|ft|featuring|and|i)\b|&", " ", s)
     return re.sub(r"[^a-z0-9а-я]+", " ", s).strip()
