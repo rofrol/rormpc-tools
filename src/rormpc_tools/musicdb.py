@@ -43,7 +43,7 @@ Source of truth: JSONL in data_dir (settings; committed when it is a git reposit
 db_file is a cache rebuilt from it when missing.
 Needs sticker_file in mpd.conf.
 """
-import argparse, collections, contextlib, datetime as dt, fcntl, json, os, pathlib, re, shutil, sqlite3, subprocess, sys, time, urllib.request, zipfile, zoneinfo
+import argparse, collections, contextlib, datetime as dt, fcntl, json, os, pathlib, re, shutil, sqlite3, statistics, subprocess, sys, time, urllib.request, zipfile, zoneinfo
 
 from . import identity, mbtag, settings
 
@@ -533,8 +533,9 @@ def event_file(lib, files, src, ytid, mbid, artist, title, extra, uri=None):
     return match(lib, None, None, artist, title)[0]
 
 
-def counted(c, lib):
-    """{file: (count, last_ts)}, {file: favorite}, unmatched play keys, unmatched favorites."""
+def counted(c, lib, stamps=None):
+    """{file: (count, last_ts)}, {file: favorite}, unmatched play keys, unmatched favorites. With `stamps` (a dict),
+    it also gets each file's play timestamps."""
     plays, last, unmatched = collections.Counter(), {}, collections.Counter()
     files = library_files(lib)
     prepare(lib, files)
@@ -549,6 +550,8 @@ def counted(c, lib):
         if f:
             plays[f] += 1
             last[f] = max(last.get(f, ""), ts)
+            if stamps is not None:
+                stamps.setdefault(f, []).append(ts)
         else:
             unmatched[(artist or "", title or "", ytid or "")] += 1
     favs, fav_missing = set(), []
@@ -563,34 +566,74 @@ def counted(c, lib):
 
 LIKE_TO_LB = {"2": 1, "1": 0, "0": -1}  # rmpc like sticker -> LB feedback score (love / clear / hate)
 
-# weighted shuffle (mpd-player): weight = (1 + plays) ** this; chosen 2026-10-06 on this library (766 songs, 426
-# never played): 0.75 gives never-played songs ~30% of the picks and the 50 most played ~28% (with mpd-player's
-# 20% uniform picks); 1 would make a song played 30 times 31 times likelier than a new one
-WEIGHT_EXPONENT = 0.75
+# ---------------------------------------------------------------- data for mpd-player's weighted shuffle
+
+CADENCE_MIN_D, CADENCE_MAX_D, CADENCE_DEFAULT_D = 2, 60, 14
+SKIP_WINDOW_D = 180
 
 
-def shuffle_weight(plays, like):
-    """How much more often mpd-player's weighted shuffle picks a song: (1 + all its plays) ** 0.75, doubled by a
-    like; a dislike makes it rare. 1 for a song never played."""
-    if like == "0":
-        return 0.25
-    return round((1 + plays) ** WEIGHT_EXPONENT * (2 if like == "2" else 1), 3)
+def ts_epoch(ts):
+    """Unix time of a stored timestamp (naive, the history's zone)."""
+    d = dt.datetime.fromisoformat(ts[:19])
+    return (d.replace(tzinfo=TZ) if TZ else d).timestamp()
 
 
-def write_weights(weights):
+def auto_starts():
+    """{file: [start times]} of the songs mpd-player's shuffle picked itself (its auto.jsonl): their plays are
+    exposure, not preference, so they don't raise a song's weight."""
+    p = pathlib.Path(os.environ.get("XDG_STATE_HOME") or settings.HOME / ".local/state") / "rormpc/auto.jsonl"
+    out, al = collections.defaultdict(list), aliases()
+    for r in jsonl(p) if p.exists() else []:
+        out[al.get(r["file"], r["file"])].append(float(r["start"]))
+    return out
+
+
+def shuffle_data(files, stamps, likes, durations, c):
+    """Per file: plays (preference: the shuffle's own picks left out), heard (all), last (Unix time of the last
+    play), cadence (median days between its preference plays, when it has 2+ gaps), liked/disliked, early/late
+    (Unix times of skips in the last SKIP_WINDOW_D days; early = under min(30 s, 20% of the song))."""
+    auto, al = auto_starts(), aliases()
+    now = time.time()
+    early, late = collections.defaultdict(list), collections.defaultdict(list)
+    for ts, f, dur, run in c.execute("SELECT ts, file, duration_s, run_s FROM skips"):
+        t = ts_epoch(ts)
+        if now - t > SKIP_WINDOW_D * 86400:
+            continue
+        f = al.get(f, f)
+        (early if (run or 0) < min(30, 0.2 * (dur or 150)) else late)[f].append(round(t))
+    out, medians = {}, []
+    for f in files:
+        times = sorted({round(ts_epoch(t)) for t in stamps.get(f, [])})
+        dur = durations.get(f) or 300
+        own = [t for t in times if any(a - 120 <= t <= a + dur + 900 for a in auto.get(f, []))]
+        pref = [t for t in times if t not in own]
+        gaps = [(b - a) / 86400 for a, b in zip(pref, pref[1:]) if b - a > 600]
+        cadence = None
+        if len(gaps) >= 2:
+            cadence = min(CADENCE_MAX_D, max(CADENCE_MIN_D, statistics.median(gaps)))
+            medians.append(cadence)
+        like = likes.get(f)
+        out[f] = {"plays": len(pref), "heard": len(times), "last": times[-1] if times else None,
+                  "cadence": cadence and round(cadence, 2), "liked": like == "2", "disliked": like == "0",
+                  "early": early.get(f, []), "late": late.get(f, [])}
+    return out, round(statistics.median(medians), 2) if medians else CADENCE_DEFAULT_D
+
+
+def write_weights(data, global_cadence):
     """$XDG_STATE_HOME/rormpc/weights.json for mpd-player (musicdb is its only writer), atomically."""
     d = pathlib.Path(os.environ.get("XDG_STATE_HOME") or settings.HOME / ".local/state") / "rormpc"
     d.mkdir(parents=True, exist_ok=True)
     tmp = d / ".weights.json.tmp"
-    tmp.write_text(json.dumps({"generated": dt.datetime.now().isoformat(timespec="seconds"), "files": weights}))
+    tmp.write_text(json.dumps({"version": 2, "generated": time.time(), "global_cadence": global_cadence,
+                               "files": data}))
     os.replace(tmp, d / "weights.json")
-
 
 
 def sync(_a):
     c, lib, m = db(), library(), mpd()
-    plays, last, favs, _, _ = counted(c, lib)
-    weights = {}
+    stamps = {}
+    plays, last, favs, _, _ = counted(c, lib, stamps)
+    like_of = {}
     files = library_files(lib)
     skips = skipped(c, last)
     durations = {s["file"]: float(one(s.get("duration", 0)) or 0) for s in m.listallinfo() if s.get("file")}
@@ -614,7 +657,7 @@ def sync(_a):
             n += 1
         if like in LIKE_TO_LB and f in mbid_of:
             likes[mbid_of[f]].append(LIKE_TO_LB[like])
-        weights[f] = {"w": shuffle_weight(k, like), "p": k}
+        like_of[f] = like
         if f in unfinished and like != "2" and f not in keep:
             want["notFinished"] = unfinished[f]
             candidates.append(f)
@@ -627,7 +670,7 @@ def sync(_a):
                 m.sticker_delete("song", f, key)
             n += 1
     write_likes(m, files)
-    write_weights(weights)
+    write_weights(*shuffle_data(files, stamps, like_of, durations, c))
     skipped_n = write_skipped_playlist(collections.Counter({f: k for f, k in skips.items() if f in files}))
     write_playlist("Not finished", candidates)
     print(f"{len(files)} songs, {sum(1 for f in files if plays.get(f))} with plays, "

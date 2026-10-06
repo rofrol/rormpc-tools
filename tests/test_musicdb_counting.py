@@ -155,7 +155,7 @@ def test_sync_snapshots_likes_with_the_song_identity(env, monkeypatch):
     assert likes == [{"key": f"yt:{YT}", "file": RICK, "ytid": YT, "mbid": "mb-rick", "artist": "Rick Astley",
                       "title": "Never Gonna Give You Up", "like": "2"}]
     weights = json.loads((pathlib.Path(os.environ["XDG_STATE_HOME"]) / "rormpc/weights.json").read_text())["files"]
-    assert weights[RICK]["w"] == 2  # never played, liked: doubled
+    assert weights[RICK]["liked"] and weights[RICK]["heard"] == 0
 
 
 @pytest.mark.parametrize("system_tz", ["Europe/Warsaw", "America/New_York"])
@@ -212,3 +212,22 @@ def test_update_backs_off_listenbrainz_and_keeps_the_local_steps(env, monkeypatc
     assert calls == [] and counts() == {RICK: 1}
     musicdb.lb_backoff_record(True)
     assert json.loads((tmp_path / "lb-backoff.json").read_text()) == {"failures": 0, "next": 0}
+
+
+def test_shuffle_data_preference_plays_cadence_and_skips(env, monkeypatch, tmp_path):
+    from rormpc_tools import musicdb as m
+    env(SONGS)
+    base = time.time() - 30 * 86400
+    ts = lambda t: m.local_ts(t)
+    stamps = {RICK: [ts(base), ts(base + 10 * 86400), ts(base + 20 * 86400), ts(base + 25 * 86400)]}
+    state = pathlib.Path(os.environ["XDG_STATE_HOME"]) / "rormpc"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "auto.jsonl").write_text(json.dumps({"start": round(base + 25 * 86400) - 30, "file": RICK}) + "\n")
+    c = m.db()
+    c.execute("INSERT INTO skips VALUES (?, ?, NULL, ?, ?, ?)", (ts(time.time() - 86400), RICK, 5, 200, 5))
+    c.execute("INSERT INTO skips VALUES (?, ?, NULL, ?, ?, ?)", (ts(time.time() - 2 * 86400), RICK, 120, 200, 120))
+    out, global_cadence = m.shuffle_data([RICK], stamps, {RICK: "2"}, {RICK: 200}, c)
+    r = out[RICK]
+    assert r["heard"] == 4 and r["plays"] == 3  # the shuffle's own pick is exposure, not preference
+    assert r["cadence"] == 10 and global_cadence == 10  # gaps 10, 10 days
+    assert r["liked"] and len(r["early"]) == 1 and len(r["late"]) == 1
