@@ -108,18 +108,6 @@ def test_new_lane_has_a_daily_budget_and_lends_its_turn(clock):
     assert "(lent by new)" in sh.nominee["why"]
 
 
-def test_the_lane_is_spent_only_when_its_pick_plays(state):
-    d, mpd, sh = setup(data={"b": heard(3), "c": heard(3)})
-    before = list(sh.cycle)
-    send(d, mpd, "shuffle reroll")  # withdrawn and picked again: nothing spent
-    assert sh.cycle == before
-    pick = sh.nominee["file"]
-    play(d, mpd, pick)
-    assert len(sh.cycle) == len(before) - 1
-    lines = [json.loads(l) for l in (state / "auto.jsonl").read_text().splitlines()]
-    assert lines[-1]["file"] == pick  # musicdb leaves this play out of the preference count
-
-
 def test_early_skip_rests_the_song_and_lowers_its_weight(clock):
     d, mpd, sh = setup(data={"b": heard(9, days_ago=30), "c": heard(9, days_ago=30)})
     play(d, mpd, "b")
@@ -242,20 +230,42 @@ def test_new_weights_drop_live_outcomes_they_cover(clock):
     assert sh.live == []
 
 
-def test_outlook_lists_the_next_draws_candidates_with_chances():
-    data = {"b": heard(30, cadence=10, days_ago=20), "c": heard(5, cadence=10, days_ago=20),
-            "d": heard(5, cadence=10, days_ago=20, liked=True), "e": heard(1, cadence=10, days_ago=20)}
-    d, mpd, sh = setup(data=data, cycle=["familiar", "familiar"])
-    o = sh.outlook
-    assert sh.nominee["file"] == "d" and o["lane"] == "familiar" and o["drawn_from"] == "familiar"
-    files = [t["file"] for t in o["top"]]
-    assert "d" not in files and files[0] == "b"  # the pick is not its own successor; the heaviest first
-    assert sum(t["p"] for t in o["top"]) + o["rest_p"] == pytest.approx(1, abs=0.01)
-    assert player.read_state("shuffle")["outlook"]["top"][0]["why"].startswith("familiar:")
+FILES12 = tuple("abcdefghijklmnopqrst")  # 20: enough left after rests, requests and the playing song
 
 
-def test_outlook_is_rebuilt_for_a_pick_kept_across_a_restart():
-    d, mpd, sh = setup(data={"b": heard(3), "c": heard(5)})
-    sh.outlook = None
-    asyncio.run(d.step({"player"}))
-    assert sh.outlook and sh.outlook["top"]
+def test_plan_draws_ahead_in_play_order_and_only_the_head_has_priority():
+    d, mpd, sh = setup(files=FILES12, data={f: heard(3) for f in FILES12})
+    assert len(sh.plan) == shuffle.PLAN_N
+    assert mpd.prio(sh.plan[0]["file"]) == 1 and all(mpd.prio(e["file"]) == 0 for e in sh.plan[1:])
+    assert "a" not in [e["file"] for e in sh.plan]  # not the playing song
+    assert len({e["file"] for e in sh.plan}) == shuffle.PLAN_N  # no repeats
+    assert player.read_state("shuffle")["plan"][0]["why"]
+
+
+def test_head_plays_then_the_plan_moves_up_and_is_topped_up(state):
+    d, mpd, sh = setup(files=FILES12, data={f: heard(3) for f in FILES12})
+    first, second = sh.plan[0]["file"], sh.plan[1]["file"]
+    lanes_before = len(sh.cycle) + len(sh.plan)
+    play(d, mpd, first)
+    assert sh.plan[0]["file"] == second and mpd.prio(second) == 1 and len(sh.plan) == shuffle.PLAN_N
+    assert json.loads((state / "auto.jsonl").read_text().splitlines()[-1])["file"] == first
+    assert (len(sh.cycle) + len(sh.plan)) % len(shuffle.LANES) == (lanes_before - 1) % len(shuffle.LANES)
+
+
+def test_a_planned_song_played_by_hand_or_requested_leaves_the_plan():
+    d, mpd, sh = setup(files=FILES12, data={f: heard(3) for f in FILES12})
+    third = sh.plan[2]["file"]
+    play(d, mpd, third)  # Enter on it
+    assert third not in [e["file"] for e in sh.plan]
+    fourth = sh.plan[3]["file"]
+    send(d, mpd, f"upnext add {fourth}")
+    assert fourth not in [e["file"] for e in sh.plan] and mpd.prio(fourth) == 255
+    assert len(sh.plan) == shuffle.PLAN_N
+
+
+def test_heard_enough_on_the_head_plans_again_without_it():
+    d, mpd, sh = setup(files=FILES12, data={f: heard(3) for f in FILES12})
+    head = sh.plan[0]["file"]
+    send(d, mpd, f"shuffle heardenough {head}")
+    assert head not in [e["file"] for e in sh.plan] and mpd.prio(head) == 0 and mpd.prio(sh.plan[0]["file"]) == 1
+

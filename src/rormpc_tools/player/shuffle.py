@@ -16,14 +16,16 @@ make favourites disappear): every 10 picks are a shuffled cycle of lanes, 7 fami
   20% of the song). Every skip counts, whoever started the song.
 - rests: after a song played to the end 12 h, after a late skip 12 h, after an early skip 48 h; "heard enough"
   (the e key) 1, 3, 7, then 14 days. The last 20 played are avoided when anything else is left.
-A lane with nothing eligible lends its turn to familiar, then rediscovery, then new, then any eligible song. The
-lane is spent only when its pick starts playing. When the source is a Hits result (rormpc's source.json kind
+A lane with nothing eligible lends its turn to familiar, then rediscovery, then new, then any eligible song.
+The next PLAN_N songs are drawn ahead (the plan, in play order, shown by rormpc's Shuffle view); only the first has
+the MPD priority. A planned song leaves the plan when it plays, leaves the queue, is asked for with Play next, gets
+"heard enough" or is played by hand; its lane goes back for its replacement, and the plan is topped up at the end. When the source is a Hits result (rormpc's source.json kind
 "hits"), a round plays each song once (hard rule); when all were heard it stops and says so; `shuffle newround`.
 
 Commands: `shuffle on|off|release`, `shuffle reroll`, `shuffle heardenough FILE` (the playing song also skips to
 the next), `shuffle unheardenough FILE`, `shuffle newround`.
-Files: shuffle.json (state: enabled, nominee {id, file, lane, why}, cycle, new_today, rests, cooldown, recent, live
-skips, round, active, reason, outlook: the draw after the pick with its top candidates and their chances); auto.jsonl (one line per song this shuffle started: {start, file}), read by musicdb.
+Files: shuffle.json (state: enabled, plan [{id, file, lane, slot, why}], cycle (lanes not yet planned), new_today,
+rests, cooldown, recent, live outcomes, round, active, reason); auto.jsonl (one line per song this shuffle started: {start, file}), read by musicdb.
 """
 import datetime as dt, json, math, random, time
 
@@ -41,7 +43,7 @@ COOLDOWN_DAYS = [1, 3, 7, 14]
 # asking "heard enough" again within this many days after the last cooldown ended grows it
 COOLDOWN_MEMORY_DAYS = 30
 FINISHED_SHARE = 0.8
-OUTLOOK_TOP = 30
+PLAN_N = 10
 NOMINEE_PRIO = 1
 
 
@@ -55,7 +57,7 @@ class Shuffle(Module):
     def __init__(self, rng=None):
         saved = read_state("shuffle") or {}
         self.enabled = saved.get("enabled", True)
-        self.nominee = saved.get("nominee")
+        self.plan = saved.get("plan", [])
         self.cooldown = saved.get("cooldown", {})  # "heard enough": {file: {until, level}}
         self.rests = saved.get("rests", {})  # after a play or a skip: {file: until}
         self.recent = saved.get("recent", [])
@@ -63,7 +65,6 @@ class Shuffle(Module):
         self.cycle = saved.get("cycle", [])
         self.new_today = saved.get("new_today", {"day": today(), "n": 0})
         self.round = saved.get("round")
-        self.outlook = saved.get("outlook")  # the draw after the pick, for rormpc's Shuffle view
         self.current = None  # songid being timed
         self.playing = None  # {id, file, played, last, running, duration, origin}
         self.random_seen = None  # MPD's random at the last wake, to notice it being turned off
@@ -74,9 +75,14 @@ class Shuffle(Module):
 
     def save(self):
         write_state("shuffle", {
-            "enabled": self.enabled, "nominee": self.nominee, "cooldown": self.cooldown, "rests": self.rests,
-            "recent": self.recent, "live": self.live, "cycle": self.cycle, "new_today": self.new_today,
-            "round": self.round, "active": self.active, "reason": self.reason, "outlook": self.outlook})
+            "enabled": self.enabled, "plan": self.plan, "nominee": self.nominee, "cooldown": self.cooldown,
+            "rests": self.rests, "recent": self.recent, "live": self.live, "cycle": self.cycle,
+            "new_today": self.new_today, "round": self.round, "active": self.active, "reason": self.reason})
+
+    @property
+    def nominee(self):
+        """The next song: the head of the plan, the one with the MPD priority."""
+        return self.plan[0] if self.plan else None
 
     # ------------------------------------------------------------ data
 
@@ -131,16 +137,21 @@ class Shuffle(Module):
 
     # ------------------------------------------------------------ choosing
 
-    def next_lane(self):
+    def take_lane(self):
         if not self.cycle:
             self.cycle = LANES[:]
             self.rng.shuffle(self.cycle)
-        return self.cycle[0]
+        return self.cycle.pop(0)
+
+    def give_back(self, entries):
+        """Planned songs that leave the plan return their lanes, first in line, for their replacements."""
+        self.cycle = [e["slot"] for e in entries if e.get("slot")] + self.cycle
 
     def new_left(self):
         if self.new_today.get("day") != today():
             self.new_today = {"day": today(), "n": 0}
-        return NEW_PER_DAY - self.new_today["n"]
+        planned = sum(1 for e in self.plan if e.get("lane") == "new")
+        return NEW_PER_DAY - self.new_today["n"] - planned
 
     def quarantined(self, file, now):
         """A new song skipped early on two different days rests NEW_QUARANTINE_D days from the second."""
@@ -181,39 +192,9 @@ class Shuffle(Module):
         if lane == "rediscovery":
             return f"rediscovery: {ago}{skips}"
         if lane == "new":
-            return f"new ({self.new_today['n'] + 1}/{NEW_PER_DAY} today){skips}"
+            n = NEW_PER_DAY - self.new_left() + 1
+            return f"new ({n}/{NEW_PER_DAY} today){skips}"
         return f"any: nothing else was eligible{skips}"
-
-    async def choose(self, d):
-        """Nominate the next song (priority 1), or explain why there is none."""
-        q = await d.mpd.playlistinfo()
-        current = d.status.get("songid")
-        now = time.time()
-        self.ensure_round()
-        in_round = set(self.round["heard"]) if self.round else set()
-        waiting = self.upnext_ids(d)
-        base = [s for s in q if s.get("id") != current and int(s.get("prio", 0)) == 0
-                and int(s["id"]) not in waiting and not self.resting(s["file"], now)]
-        if self.round:
-            self.round["total"] = len({s["file"] for s in q})
-            base = [s for s in base if s["file"] not in in_round]  # each once per round: a hard rule
-            if not any(s["file"] not in in_round for s in q if s.get("id") != current):
-                self.round["done"] = True
-                self.reason = f"round done: all {self.round['total']} heard (shuffle newround starts another)"
-                return
-        recent = set(self.recent[-RECENT_MAX:])
-        eligible = [s for s in base if s["file"] not in recent] or base  # recent is soft
-        if not eligible:
-            self.reason = "nothing to pick (all resting or requested)"
-            return
-        lane = self.next_lane()
-        used, pool, ws = self.draw_pool(lane, eligible, now)
-        pick = self.rng.choices(pool, weights=ws)[0]
-        await d.mpd.prioid(NOMINEE_PRIO, pick["id"])
-        why = self.explain(used, pick["file"], now) + ("" if used == lane else f" (lent by {lane})")
-        self.nominee = {"id": int(pick["id"]), "file": pick["file"], "lane": used, "slot": lane, "why": why}
-        self.reason = ""
-        self.plan_outlook(eligible, pick, now, len(q), len(base))
 
     def draw_pool(self, lane, eligible, now):
         """The pool a draw for `lane` samples (a lane with nothing eligible lends its turn) and its weights."""
@@ -226,29 +207,71 @@ class Shuffle(Module):
             ws = [self.skip_factor(s["file"], now) for s in pool]
         return used, pool, ws
 
-    def plan_outlook(self, eligible, pick, now, queued, not_resting, top=OUTLOOK_TOP):
-        """The draw after the pick, as rormpc's Shuffle view shows it: its lane and its top candidates with their
-        chance in that draw (if the pick plays and nothing else changes; it is redrawn after every song)."""
-        after = [s for s in eligible if s["file"] != pick["file"]]
-        lane = self.cycle[1] if len(self.cycle) > 1 else "next cycle"
-        used, pool, ws = self.draw_pool(lane if lane != "next cycle" else "familiar", after, now) if after else (
-            "none", [], [])
-        total = sum(ws) or 1
-        ranked = sorted(zip(pool, ws), key=lambda x: -x[1])
-        self.outlook = {
-            "lane": lane, "drawn_from": used, "pool": len(pool), "eligible": len(after), "queued": queued,
-            "resting": queued - not_resting,
-            "top": [{"file": s["file"], "p": round(w / total, 4), "why": self.explain(used, s["file"], now)}
-                    for s, w in ranked[:top]],
-            "rest_p": round(sum(w for _, w in ranked[top:]) / total, 4)}
+    async def check_plan(self, d, q):
+        """Drop planned songs that left the queue, were asked for (Up next) or got "heard enough", or that a round
+        has already heard; their lanes go back. True when the plan changed."""
+        now = time.time()
+        by_id = {int(s["id"]): s for s in q}
+        waiting = self.upnext_ids(d)
+        in_round = set(self.round["heard"]) if self.round else set()
+        keep, gone = [], []
+        for k, e in enumerate(self.plan):
+            s = by_id.get(e["id"])
+            c = self.cooldown.get(e["file"])
+            ok = (s is not None and s["file"] == e["file"] and e["id"] not in waiting
+                  and int(s.get("prio", 0)) in ((NOMINEE_PRIO, 0) if k == 0 else (0,))
+                  and not (c and c["until"] > now) and e["file"] not in in_round)
+            (keep if ok else gone).append(e)
+        self.plan = keep
+        self.give_back(gone)
+        return bool(gone)
+
+    async def fill_plan(self, d, q=None):
+        """Top the plan up to PLAN_N draws (or explain why there is none) and give its head priority 1."""
+        q = q if q is not None else await d.mpd.playlistinfo()
+        current = d.status.get("songid")
+        now = time.time()
+        self.ensure_round()
+        in_round = set(self.round["heard"]) if self.round else set()
+        waiting = self.upnext_ids(d)
+        planned = {e["file"] for e in self.plan}
+        base = [s for s in q if s.get("id") != current and int(s.get("prio", 0)) in (0, NOMINEE_PRIO)
+                and int(s["id"]) not in waiting and not self.resting(s["file"], now) and s["file"] not in planned]
+        if self.round:
+            self.round["total"] = len({s["file"] for s in q})
+            base = [s for s in base if s["file"] not in in_round]  # each once per round: a hard rule
+            if not base and not self.plan:
+                if not any(s["file"] not in in_round for s in q if s.get("id") != current):
+                    self.round["done"] = True
+                    self.reason = f"round done: all {self.round['total']} heard (shuffle newround starts another)"
+                    return
+        recent = set(self.recent[-RECENT_MAX:])
+        while len(self.plan) < PLAN_N and base:
+            eligible = [s for s in base if s["file"] not in recent] or base  # recent is soft
+            lane = self.take_lane()
+            used, pool, ws = self.draw_pool(lane, eligible, now)
+            pick = self.rng.choices(pool, weights=ws)[0]
+            why = self.explain(used, pick["file"], now) + ("" if used == lane else f" (lent by {lane})")
+            self.plan.append({"id": int(pick["id"]), "file": pick["file"], "lane": used, "slot": lane, "why": why})
+            base = [s for s in base if s["file"] != pick["file"]]
+        if not self.plan:
+            self.reason = "nothing to pick (all resting or requested)"
+            return
+        self.reason = ""
+        head = self.plan[0]
+        e = next((s for s in q if int(s["id"]) == head["id"]), None)
+        if e is not None and int(e.get("prio", 0)) != NOMINEE_PRIO:
+            await d.mpd.prioid(NOMINEE_PRIO, head["id"])
 
     async def withdraw(self, d):
-        """Take back the pick's priority (its lane is not spent)."""
-        if self.nominee:
-            e = await queue_entry(d.mpd, self.nominee["id"])
-            if e and e.get("file") == self.nominee["file"] and int(e.get("prio", 0)) == NOMINEE_PRIO:
-                await d.mpd.prioid(0, self.nominee["id"])
-            self.nominee = None
+        """Give up the plan: the head's priority is taken back and the lanes return."""
+        if self.plan:
+            head = self.plan[0]
+            e = await queue_entry(d.mpd, head["id"])
+            if e and e.get("file") == head["file"] and int(e.get("prio", 0)) == NOMINEE_PRIO:
+                await d.mpd.prioid(0, head["id"])
+            self.give_back(self.plan)
+            self.plan = []
 
     def is_active(self, s):
         if not self.enabled:
@@ -300,19 +323,21 @@ class Shuffle(Module):
             self.playing = None
             return
         origin = "other"
-        if self.nominee and str(self.nominee["id"]) == s.get("songid"):
+        if self.plan and str(self.plan[0]["id"]) == s.get("songid"):
             origin = "auto"
-            slot = self.nominee.get("slot")
-            if slot in self.cycle:
-                self.cycle.remove(slot)  # the lane is spent now that its pick plays
-            if self.nominee.get("lane") == "new":
+            head = self.plan.pop(0)  # its lane is spent now that it plays
+            if head.get("lane") == "new":
                 self.new_left()
                 self.new_today["n"] += 1
             p = state_dir() / "auto.jsonl"
             p.parent.mkdir(parents=True, exist_ok=True)
             with p.open("a") as fh:
                 fh.write(json.dumps({"start": round(now), "file": file}) + "\n")
-            self.nominee = None
+        else:
+            # played by hand (Enter, Up next, a phone): it leaves the plan, its lane goes back
+            gone = [e for e in self.plan if e["file"] == file]
+            self.plan = [e for e in self.plan if e["file"] != file]
+            self.give_back(gone)
         self.playing = {"id": int(s["songid"]), "file": file, "played": float(s.get("elapsed", 0) or 0),
                         "last": now, "running": s.get("state") == "play", "origin": origin,
                         "duration": float(s.get("duration", 0) or cur.get("duration", 0) or 0)}
@@ -347,44 +372,25 @@ class Shuffle(Module):
             if song is not None:
                 await self.song_started(d, s, now)
             dirty = True
-        if self.nominee:
-            # gone from the queue, or asked for with Play next (an Up next priority): no longer our pick
-            e = await queue_entry(d.mpd, self.nominee["id"])
-            if (not e or e.get("file") != self.nominee["file"] or self.nominee["id"] in self.upnext_ids(d)
-                    or int(e.get("prio", 0)) != NOMINEE_PRIO):
-                self.nominee = None
+        q = None
+        if self.plan:
+            q = await d.mpd.playlistinfo()
+            if await self.check_plan(d, q):
                 dirty = True
         active, why = self.is_active(s)
         if active != self.active or (not active and why != self.reason):
             self.active, self.reason = active, why
             dirty = True
         if not active:
-            if self.nominee:
+            if self.plan:
                 await self.withdraw(d)
                 dirty = True
-        elif not self.nominee and not (self.round and self.round.get("done")):
-            await self.choose(d)
-            dirty = True
-        elif self.nominee and not self.outlook:
-            await self.refresh_outlook(d)  # e.g. a pick kept across a restart of an older version
-            dirty = True
+        elif len(self.plan) < PLAN_N and not (self.round and self.round.get("done")):
+            before = [e["id"] for e in self.plan]
+            await self.fill_plan(d, q)
+            dirty = dirty or [e["id"] for e in self.plan] != before
         if dirty:
             self.save()
-
-    async def refresh_outlook(self, d):
-        """The outlook for the pick already made (choose() makes it together with a new pick)."""
-        q = await d.mpd.playlistinfo()
-        now = time.time()
-        current, waiting = d.status.get("songid"), self.upnext_ids(d)
-        in_round = set(self.round["heard"]) if self.round else set()
-        base = [s for s in q if s.get("id") != current and int(s["id"]) not in waiting
-                and int(s.get("prio", 0)) in (0, NOMINEE_PRIO) and not self.resting(s["file"], now)
-                and s["file"] not in in_round]
-        recent = set(self.recent[-RECENT_MAX:])
-        eligible = [s for s in base if s["file"] not in recent] or base
-        pick = next((s for s in q if int(s["id"]) == self.nominee["id"]), None)
-        if pick:
-            self.plan_outlook(eligible, pick, now, len(q), len(base))
 
     async def on_message(self, d, verb, args):
         if verb == "on":
@@ -406,8 +412,12 @@ class Shuffle(Module):
             recent_cooldown = c and c["until"] + COOLDOWN_MEMORY_DAYS * 86400 > now
             level = min(len(COOLDOWN_DAYS) - 1, c["level"] + 1) if recent_cooldown else 0
             self.cooldown[args] = {"until": now + COOLDOWN_DAYS[level] * 86400, "level": level}
-            if self.nominee and self.nominee["file"] == args:
-                await self.withdraw(d)
+            gone = [e for e in self.plan if e["file"] == args]
+            if gone and gone[0] is self.plan[0]:
+                await self.withdraw(d)  # the head had the priority: plan again
+            else:
+                self.plan = [e for e in self.plan if e["file"] != args]
+                self.give_back(gone)
             cur = await d.mpd.currentsong()
             if cur.get("file") == args:
                 await d.mpd.next()
@@ -427,6 +437,6 @@ class Shuffle(Module):
         d.status = await d.mpd.status()
         active, self.reason = self.is_active(d.status)
         self.active = active
-        if active and not self.nominee and not (self.round and self.round.get("done")):
-            await self.choose(d)
+        if active and len(self.plan) < PLAN_N and not (self.round and self.round.get("done")):
+            await self.fill_plan(d)
         self.save()
