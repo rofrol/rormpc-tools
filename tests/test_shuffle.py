@@ -155,9 +155,9 @@ def test_off_withdraws_and_stays_off():
 def test_musicdb_shuffle_weight():
     from rormpc_tools import musicdb
     assert musicdb.shuffle_weight(0, None) == 1
-    assert musicdb.shuffle_weight(0, "2") == 2  # a like
-    assert 1 < musicdb.shuffle_weight(5, "1") < musicdb.shuffle_weight(50, "1") <= 3
-    assert musicdb.shuffle_weight(1000, "2") == 3  # capped
+    assert musicdb.shuffle_weight(0, "2") == 2  # a like doubles
+    assert musicdb.shuffle_weight(30, "1") == round(31 ** 0.75, 3)  # ~13: played songs clearly win
+    assert musicdb.shuffle_weight(5, "1") < musicdb.shuffle_weight(50, "1")
     assert musicdb.shuffle_weight(10, "0") == 0.25  # a dislike: rare
 
 

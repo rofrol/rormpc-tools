@@ -4,8 +4,8 @@ the current song and the Up next requests (so the queue's order changes as it pl
 plays first. It excludes MPD's random: turning it on turns random off, and random turned on (by any client, e.g.
 rormpc's x or a phone) turns it off.
 
-The weight comes from `musicdb sync` (weights.json, hourly): 1 for a song never played, up to 3 for songs played a
-lot lately (log-compressed, a play counts half after 60 days) or liked; a dislike makes it rare. One pick in five
+The weight comes from `musicdb sync` (weights.json, hourly): (1 + the song's plays) ** 0.75, doubled for a like; 1
+for a song never played, about 13 for one played 30 times; a dislike makes it rare. One pick in five
 ignores the weights (exploration), so songs that were never played still come up. Excluded from automatic picks:
 the songs played lately, and songs in a "heard enough" cooldown (1, 3, 7, then 14 days, growing each time it is
 asked again while the last one is recent). Enter and Play next still play them: the cooldown only stops this pick.

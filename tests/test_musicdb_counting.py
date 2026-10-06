@@ -155,7 +155,7 @@ def test_sync_snapshots_likes_with_the_song_identity(env, monkeypatch):
     assert likes == [{"key": f"yt:{YT}", "file": RICK, "ytid": YT, "mbid": "mb-rick", "artist": "Rick Astley",
                       "title": "Never Gonna Give You Up", "like": "2"}]
     weights = json.loads((pathlib.Path(os.environ["XDG_STATE_HOME"]) / "rormpc/weights.json").read_text())["files"]
-    assert weights[RICK]["w"] == 2  # never played, liked
+    assert weights[RICK]["w"] == 2  # never played, liked: doubled
 
 
 @pytest.mark.parametrize("system_tz", ["Europe/Warsaw", "America/New_York"])

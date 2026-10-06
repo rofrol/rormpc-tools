@@ -533,11 +533,9 @@ def event_file(lib, files, src, ytid, mbid, artist, title, extra, uri=None):
     return match(lib, None, None, artist, title)[0]
 
 
-def counted(c, lib, decayed=None):
-    """{file: (count, last_ts)}, {file: favorite}, unmatched play keys, unmatched favorites. With `decayed` (a
-    dict), it also gets each file's plays weighted by age: a play counts 1/2 after WEIGHT_HALF_LIFE days."""
+def counted(c, lib):
+    """{file: (count, last_ts)}, {file: favorite}, unmatched play keys, unmatched favorites."""
     plays, last, unmatched = collections.Counter(), {}, collections.Counter()
-    now = dt.datetime.now()
     files = library_files(lib)
     prepare(lib, files)
     local = {ts for (ts,) in c.execute("SELECT ts FROM events WHERE source = 'local'")}
@@ -551,12 +549,6 @@ def counted(c, lib, decayed=None):
         if f:
             plays[f] += 1
             last[f] = max(last.get(f, ""), ts)
-            if decayed is not None:
-                try:
-                    age = max(0.0, (now - dt.datetime.fromisoformat(ts[:19])).total_seconds() / 86400)
-                except ValueError:
-                    age = 0.0
-                decayed[f] = decayed.get(f, 0.0) + 0.5 ** (age / WEIGHT_HALF_LIFE)
         else:
             unmatched[(artist or "", title or "", ytid or "")] += 1
     favs, fav_missing = set(), []
@@ -571,17 +563,18 @@ def counted(c, lib, decayed=None):
 
 LIKE_TO_LB = {"2": 1, "1": 0, "0": -1}  # rmpc like sticker -> LB feedback score (love / clear / hate)
 
-# weighted shuffle (mpd-player): a play's weight halves every this many days
-WEIGHT_HALF_LIFE = 60
+# weighted shuffle (mpd-player): weight = (1 + plays) ** this; chosen 2026-10-06 on this library (766 songs, 426
+# never played): 0.75 gives never-played songs ~30% of the picks and the 50 most played ~28% (with mpd-player's
+# 20% uniform picks); 1 would make a song played 30 times 31 times likelier than a new one
+WEIGHT_EXPONENT = 0.75
 
 
-def shuffle_weight(decayed_plays, like):
-    """How much more often mpd-player's weighted shuffle picks a song: 1 (never played) to 3, by recent plays
-    (log-compressed, so the most played songs don't take all the airtime) and a like; a dislike makes it rare."""
-    import math
+def shuffle_weight(plays, like):
+    """How much more often mpd-player's weighted shuffle picks a song: (1 + all its plays) ** 0.75, doubled by a
+    like; a dislike makes it rare. 1 for a song never played."""
     if like == "0":
         return 0.25
-    return round(min(3.0, max(1.0, 1 + 0.3 * math.log1p(decayed_plays) + (1 if like == "2" else 0))), 3)
+    return round((1 + plays) ** WEIGHT_EXPONENT * (2 if like == "2" else 1), 3)
 
 
 def write_weights(weights):
@@ -596,8 +589,7 @@ def write_weights(weights):
 
 def sync(_a):
     c, lib, m = db(), library(), mpd()
-    decayed = {}
-    plays, last, favs, _, _ = counted(c, lib, decayed)
+    plays, last, favs, _, _ = counted(c, lib)
     weights = {}
     files = library_files(lib)
     skips = skipped(c, last)
@@ -622,7 +614,7 @@ def sync(_a):
             n += 1
         if like in LIKE_TO_LB and f in mbid_of:
             likes[mbid_of[f]].append(LIKE_TO_LB[like])
-        weights[f] = {"w": shuffle_weight(decayed.get(f, 0.0), like), "p": round(decayed.get(f, 0.0), 2)}
+        weights[f] = {"w": shuffle_weight(k, like), "p": k}
         if f in unfinished and like != "2" and f not in keep:
             want["notFinished"] = unfinished[f]
             candidates.append(f)
