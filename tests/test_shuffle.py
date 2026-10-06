@@ -278,3 +278,11 @@ def test_a_round_takes_only_the_snapshot_not_the_song_playing_at_the_switch():
     mpd.cur = "1"  # x was playing when the source switched
     asyncio.run(d.step({"player"}))
     assert "x" not in [e["file"] for e in sh.plan] and sh.round["total"] == 2
+
+
+def test_a_full_plan_kept_across_a_restart_gets_its_priorities():
+    d, mpd, sh = setup(files=FILES12, data={f: heard(3) for f in FILES12})
+    for s in mpd.q:
+        s["prio"] = 0  # e.g. written by an older version that set only the head
+    asyncio.run(d.step({"player"}))
+    assert [mpd.prio(e["file"]) for e in sh.plan] == list(range(shuffle.PLAN_N, 0, -1))

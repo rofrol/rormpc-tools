@@ -401,6 +401,8 @@ class Shuffle(Module):
             before = [e["id"] for e in self.plan]
             await self.fill_plan(d, q)
             dirty = dirty or [e["id"] for e in self.plan] != before
+        elif self.plan and q is not None:
+            await self.publish(d, q)  # e.g. a plan kept across a restart: its priorities may be missing
         if dirty:
             self.save()
 
