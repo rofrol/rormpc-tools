@@ -56,16 +56,16 @@ def check():
                                "files": sorted(lib[2][musicdb.name_key(a, t)])} for (a, t), n in ambiguous.most_common()]
     out["local-orphans"] = orphans
 
-    stale = []
+    stale, al = [], musicdb.aliases()
     for (f,) in c.execute("SELECT DISTINCT file FROM skips"):
-        if f not in files:
+        if musicdb.canon(f, al) not in files:
             stale.append({"where": "skips", "file": f})
     for r in musicdb.jsonl(musicdb.DATA / "not-finished-keep.jsonl"):
-        if r.get("file") and r["file"] not in files:
+        if r.get("file") and musicdb.canon(r["file"], al) not in files:
             stale.append({"where": "not-finished-keep.jsonl", "file": r["file"]})
     for name, songs_in in tags.lists().items():
         for e in songs_in.values():
-            if e["song"].get("file") not in files:
+            if musicdb.canon(e["song"].get("file"), al) not in files:
                 stale.append({"where": f"list {name}", "file": e["song"].get("file")})
     for r in musicdb.jsonl(musicdb.DATA / "likes.jsonl"):
         if r.get("file") not in files:

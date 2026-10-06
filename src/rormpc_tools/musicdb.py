@@ -21,6 +21,7 @@
   musicdb tag add|remove|list|of ...   # hand-made lists (God, melancholic, ...); musicdb tag --help
   musicdb genre add|exclude|reset GENRE --current   # correct a song's MusicBrainz genres
   musicdb chart [--bucket month] [--open]  # HTML page: how my most played songs rose and fell
+  musicdb dedupe [--apply]              # one file per identical audio stream: state merged, copies quarantined
   musicdb doctor [--json] [-v]          # silent data errors: duplicate listens, songs in several files, paths
                                         # that no longer exist, plays credited to no file (read-only)
   musicdb lyrics --help             # lyrics from LRCLIB into lyrics_dir (rmpc's Lyrics pane)
@@ -65,6 +66,22 @@ def local_ts(when):
     """Stored timestamp ("2026-09-26T02:16:18", the history's zone) of a Unix time or an aware datetime."""
     d = dt.datetime.fromtimestamp(when, TZ) if isinstance(when, (int, float)) else when.astimezone(TZ)
     return d.replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def aliases():
+    """{old path: current path} from aliases.jsonl in data_dir: files merged into another copy (`musicdb dedupe`)
+    or moved. History and logs keep the path they were written with; readers map it through canon()."""
+    out = {r["old"]: r["new"] for r in jsonl(DATA / "aliases.jsonl")}
+    for old in out:  # follow chains (a -> b -> c)
+        seen = {old}
+        while out[old] in out and out[old] not in seen:
+            seen.add(out[old]); out[old] = out[out[old]]
+    return out
+
+
+def canon(f, al=None):
+    """The current path of a file that may since have been merged or moved."""
+    return (aliases() if al is None else al).get(f, f)
 
 
 def epoch_of(ts):
@@ -280,8 +297,9 @@ def import_skips(_a):
 
 def skipped(c, last):
     """{file: skips since the file's last play}, only songs skipped at least once since then."""
-    n = collections.Counter()
+    n, al = collections.Counter(), aliases()
     for ts, f in c.execute("SELECT ts, file FROM skips"):
+        f = al.get(f, f)
         if ts > last.get(f, ""):
             n[f] += 1
     return n
@@ -307,13 +325,13 @@ def not_finished(c, durations):
     of the song without a seek. Songs shorter than NF_MIN_S (intros, skits) and never-played songs are no data.
     Likes and "keep" decisions are applied by the caller."""
     since = (dt.datetime.now() - dt.timedelta(days=NF_DAYS)).isoformat()
-    done, skips = collections.defaultdict(list), collections.defaultdict(list)
+    done, skips, al = collections.defaultdict(list), collections.defaultdict(list), aliases()
     for ts, extra in c.execute("SELECT ts, extra FROM events WHERE source = 'local' AND ts >= ?", (since,)):
-        f = json.loads(extra or "{}").get("file")
+        f = canon(json.loads(extra or "{}").get("file"), al)
         if f:
             done[f].append(ts)
     for ts, f, pos, dur, run in c.execute("SELECT ts, file, position_s, duration_s, run_s FROM skips WHERE ts >= ?", (since,)):
-        skips[f].append((ts, pos or 0, dur or durations.get(f, 0), run or 0))
+        skips[canon(f, al)].append((ts, pos or 0, dur or durations.get(f, 0), run or 0))
     out = {}
     for f in set(done) | set(skips):
         dur = durations.get(f) or max((d for _, _, d, _ in skips[f]), default=0)
@@ -331,9 +349,9 @@ def not_finished(c, durations):
 
 def kept():
     """Files I marked "keep" (not a deletion candidate) with `musicdb keep`; "unkeep" revokes."""
-    state = {}
+    state, al = {}, aliases()
     for e in jsonl(NF_KEEP):
-        state[e["file"]] = e["action"] == "keep"
+        state[canon(e["file"], al)] = e["action"] == "keep"
     return {f for f, k in state.items() if k}
 
 
@@ -477,15 +495,21 @@ def library_files(lib):
     return set(lib[0].values()) | set(lib[1].values()) | {f for fs in lib[2].values() for f in fs}
 
 
+ALIASES_CACHE = {}  # aliases() for event_file, refreshed by counted()
+
+
 def event_file(lib, files, src, ytid, mbid, artist, title, extra):
     """Library file of a play: the scrobbler's local log names it, other sources are matched."""
-    if src == "local" and (f := json.loads(extra or "{}").get("file")) in files:
-        return f
+    if src == "local":
+        f = json.loads(extra or "{}").get("file")
+        if (f := ALIASES_CACHE.get(f, f)) in files:
+            return f
     return match(lib, ytid, mbid, artist, title)[0]
 
 
 def counted(c, lib):
     """{file: (count, last_ts)}, {file: favorite}, unmatched play keys, unmatched favorites."""
+    ALIASES_CACHE.clear(); ALIASES_CACHE.update(aliases())
     plays, last, unmatched = collections.Counter(), {}, collections.Counter()
     files = library_files(lib)
     local = {ts for (ts,) in c.execute("SELECT ts FROM events WHERE source = 'local'")}
@@ -710,6 +734,7 @@ def journal_lock():
 def describe(rel, rows, lib, m):
     """What deleting rel touches: its plays (all sources), recording MBID and video id."""
     files = library_files(lib)
+    ALIASES_CACHE.clear(); ALIASES_CACHE.update(aliases())
     info = (m.find("file", rel) or [{}])[0]
     y = YTID_IN_NAME.search(rel)
     return {"file": rel, "artist": one(info.get("artist", "")), "title": one(info.get("title", pathlib.Path(rel).stem)),
@@ -1045,6 +1070,9 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "chart":
         from . import chart
         return chart.main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "dedupe":
+        from . import dedupe
+        return dedupe.main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "doctor":
         from . import doctor
         return doctor.main(sys.argv[2:])

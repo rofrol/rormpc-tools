@@ -107,8 +107,11 @@ def write_playlists(state):
     for old in settings.MPD_PLAYLISTS.glob("Tag *.m3u"):
         if old.stem[4:] not in state:
             old.unlink()
+    from .musicdb import aliases
+    al = aliases()
     for name, songs in state.items():
-        files = [e["song"]["file"] for e in sorted(songs.values(), key=lambda e: e["ts"]) if e["song"]["file"] in known]
+        files = [al.get(e["song"]["file"], e["song"]["file"]) for e in sorted(songs.values(), key=lambda e: e["ts"])]
+        files = list(dict.fromkeys(f for f in files if f in known))  # two merged copies: listed once
         (settings.MPD_PLAYLISTS / f"Tag {name}.m3u").write_text("".join(f + "\n" for f in files))
 
 

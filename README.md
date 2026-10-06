@@ -74,6 +74,9 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   `hits.hide_key`): don't add another normalisation. A name shared by several files is credited to none.
 - MPD keys stickers by path: `sync` snapshots like stickers with the song's YouTube id and MBID into
   `likes.jsonl` in data_dir, so a move or rename can put them back.
+- Merged or moved files are recorded in `aliases.jsonl` in data_dir (old path -> current path); history and
+  logs keep the path they were written with and readers map it through `musicdb.canon()`. `musicdb dedupe`
+  keeps one file per identical audio stream and writes these aliases.
 - `musicdb doctor` lists silent data errors (duplicate listens, a song in several files, plays credited to no
   file, paths that no longer exist); run it after anything that changes history or moves files.
 - Personal data (play history, exports, OAuth secrets, account names) never goes into this repository: it is
