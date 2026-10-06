@@ -1,8 +1,9 @@
-"""Weighted shuffle, a mode of its own next to MPD's random: the next song is drawn here by weight. With random on
-it is nominated with MPD priority 1, below the Up next requests (2-255); with random off it is moved right after
-the current song and the Up next requests (so the queue's order changes as it plays). Either way a request always
-plays first. It excludes MPD's random: turning it on turns random off, and random turned on (by any client, e.g.
-rormpc's x or a phone) turns it off.
+"""Weighted shuffle, a mode of its own next to MPD's plain random: the next song is drawn here by weight and given MPD
+priority 1, below the Up next requests (2-255), so a request always plays first. Priorities steer MPD only with
+random on, so this mode owns MPD's random: `shuffle on` turns random on, `shuffle off` turns it off (the queue plays
+in order); random turned off by any client (a phone, mpc) turns this off too; `shuffle release` turns this off and
+leaves plain random on (rormpc's x). Nothing in the queue is moved: a priority is a property of the song, so other
+clients' reordering never breaks the pick. Other clients see random on while this runs.
 
 The weight comes from `musicdb sync` (weights.json, hourly): (1 + the song's plays) ** 0.75, doubled for a like; 1
 for a song never played, about 13 for one played 30 times; a dislike makes it rare. One pick in five
@@ -14,7 +15,7 @@ When the source is a Hits result (rormpc's source.json kind "hits"), a round pla
 picked again until all were heard (a song played by hand counts). When the round is done this stops nominating
 and says so; `shuffle newround` starts the next one.
 
-Commands: `shuffle on|off`, `shuffle reroll`, `shuffle heardenough FILE` (the playing song also skips to the
+Commands: `shuffle on|off|release`, `shuffle reroll`, `shuffle heardenough FILE` (the playing song also skips to the
 next), `shuffle unheardenough FILE`, `shuffle newround`.
 shuffle.json: {"enabled", "nominee": {"id", "file", "why"} or null, "cooldown": {file: {"until", "level"}},
 "recent": [files], "round": {"source", "heard": [files], "total", "done"} or null, "active", "reason"}.
@@ -42,7 +43,7 @@ class Shuffle(Module):
         self.recent = saved.get("recent", [])
         self.round = saved.get("round")
         self.current = None
-        self.random_seen = None  # MPD's random at the last wake, to notice it being turned on
+        self.random_seen = None  # MPD's random at the last wake, to notice it being turned off
         self.active = False
         self.reason = ""
         self.rng = rng or random.Random()
@@ -79,7 +80,7 @@ class Shuffle(Module):
         return {int(e["id"]) for e in getattr(u, "entries", [])}
 
     async def withdraw(self, d):
-        """Take back the pick: its priority (random on); a song moved forward (random off) just stays there."""
+        """Take back the pick's priority."""
         if self.nominee:
             e = await queue_entry(d.mpd, self.nominee["id"])
             if e and e.get("file") == self.nominee["file"] and int(e.get("prio", 0)) == NOMINEE_PRIO:
@@ -116,17 +117,15 @@ class Shuffle(Module):
             ws = [w.get(s["file"], 1.0) for s in pool]
             pick = self.rng.choices(pool, weights=ws)[0]
             why = f"weighted (w {w.get(pick['file'], 1.0):g})"
-        random_on = d.status.get("random") == "1"
-        if random_on:
-            await d.mpd.prioid(NOMINEE_PRIO, pick["id"])
-        elif d.status.get("song") is not None:
-            await d.mpd.moveid(pick["id"], f"+{len(waiting)}")  # after the current song and the requests
-        self.nominee = {"id": int(pick["id"]), "file": pick["file"], "why": why, "random": random_on}
+        await d.mpd.prioid(NOMINEE_PRIO, pick["id"])
+        self.nominee = {"id": int(pick["id"]), "file": pick["file"], "why": why}
         self.reason = ""
 
     def is_active(self, s):
         if not self.enabled:
             return False, "off"
+        if s.get("random") != "1":
+            return False, "random is off"
         if s.get("consume", "0") != "0":
             return False, "consume is on"
         if s.get("single") == "1":
@@ -152,10 +151,16 @@ class Shuffle(Module):
         dirty = False
         self.ensure_round()
         random_on = s.get("random") == "1"
-        if random_on and self.random_seen is False and self.enabled:
-            # random was just turned on: the two modes exclude each other, the newer one wins
-            self.enabled = False
-            await self.withdraw(d)
+        if self.enabled and not random_on:
+            if self.random_seen is None:
+                # starting up (or upgraded from a version that ran with random off): this mode owns random
+                await d.mpd.random(1)
+                random_on = True
+                s = d.status = {**s, "random": "1"}
+            else:
+                # another client turned random off: the user wants the queue in order, this mode yields
+                self.enabled = False
+                await self.withdraw(d)
             dirty = True
         self.random_seen = random_on
         song = s.get("songid")
@@ -170,23 +175,12 @@ class Shuffle(Module):
                 self.nominee = None  # it is playing (MPD reset its priority)
                 dirty = True
         if self.nominee:
-            # gone from the queue, or asked for with Play next: no longer our pick; random switched: pick again the
-            # other way (priority vs. position)
+            # gone from the queue, or asked for with Play next (an Up next priority): no longer our pick
             e = await queue_entry(d.mpd, self.nominee["id"])
-            random_on = s.get("random") == "1"
             if (not e or e.get("file") != self.nominee["file"] or self.nominee["id"] in self.upnext_ids(d)
-                    or (random_on and int(e.get("prio", 0)) != NOMINEE_PRIO)):
+                    or int(e.get("prio", 0)) != NOMINEE_PRIO):
                 self.nominee = None
                 dirty = True
-            elif self.nominee.get("random", True) != random_on:
-                await self.withdraw(d)
-                dirty = True
-            elif not random_on and s.get("song") is not None:
-                # random off: the pick must stay right after the current song and the requests; playing another
-                # song by hand (or a queue edit) leaves it elsewhere, where it would not be next
-                waiting = len(self.upnext_ids(d))
-                if int(e.get("pos", -1)) != int(s["song"]) + 1 + waiting:
-                    await d.mpd.moveid(self.nominee["id"], f"+{waiting}")
         active, why = self.is_active(s)
         if active != self.active or (not active and why != self.reason):
             self.active, self.reason = active, why
@@ -202,14 +196,17 @@ class Shuffle(Module):
             self.save()
 
     async def on_message(self, d, verb, args):
-        if verb in ("on", "off"):
-            self.enabled = verb == "on"
-            if not self.enabled:
-                await self.withdraw(d)
-            elif d.status.get("random") == "1":
-                await self.withdraw(d)  # a priority pick means nothing once random is off
-                await d.mpd.random(0)
-                self.random_seen = False
+        if verb == "on":
+            self.enabled = True
+            if d.status.get("random") != "1":
+                await d.mpd.random(1)  # priorities steer MPD only with random on
+            self.random_seen = True
+        elif verb in ("off", "release"):
+            self.enabled = False
+            await self.withdraw(d)
+            if verb == "off" and d.status.get("random") == "1":
+                await d.mpd.random(0)  # off: the queue plays in order; release: plain random stays
+            self.random_seen = verb == "release" and d.status.get("random") == "1"
         elif verb == "reroll":
             await self.withdraw(d)
         elif verb == "heardenough":

@@ -91,28 +91,6 @@ def test_up_next_requests_are_not_nominated_and_stay_above():
     assert sh.nominee and sh.nominee["file"] != "c" and mpd.prio(sh.nominee["file"]) == 1
 
 
-def test_random_off_moves_the_pick_right_after_the_current_song():
-    d, mpd, sh = setup(weights={"e": 3}, random=False)
-    assert sh.active and sh.nominee["file"] == "e"
-    assert mpd.files()[:2] == ["a", "e"] and mpd.prio("e") == 0  # plays next in queue order
-
-
-def test_random_off_pick_goes_after_up_next_requests():
-    d, mpd, sh = setup(weights={"e": 3}, random=False)
-    send(d, mpd, "upnext add c")
-    assert mpd.files()[:3] == ["a", "c", "e"]
-
-
-def test_switching_random_picks_again_the_other_way():
-    d, mpd, sh = setup(weights={"c": 3, "e": 2})
-    assert mpd.prio("c") == 1
-    mpd.rand = False
-    asyncio.run(d.step({"options"}))
-    assert mpd.prio("c") == 0  # its priority was taken back
-    asyncio.run(d.step({"options"}))
-    assert sh.nominee and mpd.files()[1] == sh.nominee["file"]
-
-
 def test_heard_enough_cools_down_growing_and_skips_the_playing_song():
     d, mpd, sh = setup(weights={"a": 3, "c": 2})
     send(d, mpd, "shuffle heardenough a")
@@ -173,20 +151,28 @@ def test_replaced_queue_drops_the_gone_nominee_and_starts_a_round():
     assert sh.round["source"] == "hits:80s" and sh.round["heard"] == ["x"]
 
 
-def test_turning_it_on_turns_random_off_and_random_on_turns_it_off():
-    d, mpd, sh = setup(weights={"c": 3})  # random on
+def test_it_owns_random_and_never_moves_songs():
+    d, mpd, sh = setup(weights={"e": 3}, random=False)  # enabled with random off: it turns random on
+    assert mpd.rand is True and sh.active and mpd.prio("e") == 1
+    assert mpd.files() == ["a", "b", "c", "d", "e", "f"]  # the queue's order is untouched
+
+
+def test_off_turns_random_off_and_release_keeps_plain_random():
+    d, mpd, sh = setup(weights={"c": 3})
     send(d, mpd, "shuffle off")
+    assert mpd.rand is False and not sh.enabled and mpd.prio("c") == 0
     send(d, mpd, "shuffle on")
-    assert mpd.rand is False and sh.enabled and sh.nominee
-    mpd.rand = True  # e.g. x in rormpc, or a phone
+    assert mpd.rand is True and sh.enabled and sh.nominee
+    send(d, mpd, "shuffle release")  # rormpc's x: plain random
+    assert mpd.rand is True and not sh.enabled and sh.nominee is None
     asyncio.run(d.step({"options"}))
-    assert not sh.enabled and sh.nominee is None
+    assert not sh.enabled and mpd.rand is True
+
+
+def test_random_turned_off_elsewhere_turns_it_off():
+    d, mpd, sh = setup(weights={"c": 3})
+    mpd.rand = False  # a phone
+    asyncio.run(d.step({"options"}))
+    assert not sh.enabled and sh.nominee is None and mpd.rand is False
     assert shuffle.Shuffle().enabled is False
 
-
-def test_random_off_pick_follows_a_song_played_by_hand():
-    d, mpd, sh = setup(files=("a", "b", "c", "d", "e", "f"), weights={"e": 3}, random=False)
-    assert mpd.files()[:2] == ["a", "e"]
-    play(d, mpd, "c")  # Enter on another song: the pick is no longer next...
-    assert sh.nominee["file"] == "e"
-    assert mpd.files()[mpd.files().index("c") + 1] == "e"  # ...so it moves after the new current song
