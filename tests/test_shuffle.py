@@ -252,3 +252,10 @@ def test_outlook_lists_the_next_draws_candidates_with_chances():
     assert "d" not in files and files[0] == "b"  # the pick is not its own successor; the heaviest first
     assert sum(t["p"] for t in o["top"]) + o["rest_p"] == pytest.approx(1, abs=0.01)
     assert player.read_state("shuffle")["outlook"]["top"][0]["why"].startswith("familiar:")
+
+
+def test_outlook_is_rebuilt_for_a_pick_kept_across_a_restart():
+    d, mpd, sh = setup(data={"b": heard(3), "c": heard(5)})
+    sh.outlook = None
+    asyncio.run(d.step({"player"}))
+    assert sh.outlook and sh.outlook["top"]

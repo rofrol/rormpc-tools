@@ -365,8 +365,26 @@ class Shuffle(Module):
         elif not self.nominee and not (self.round and self.round.get("done")):
             await self.choose(d)
             dirty = True
+        elif self.nominee and not self.outlook:
+            await self.refresh_outlook(d)  # e.g. a pick kept across a restart of an older version
+            dirty = True
         if dirty:
             self.save()
+
+    async def refresh_outlook(self, d):
+        """The outlook for the pick already made (choose() makes it together with a new pick)."""
+        q = await d.mpd.playlistinfo()
+        now = time.time()
+        current, waiting = d.status.get("songid"), self.upnext_ids(d)
+        in_round = set(self.round["heard"]) if self.round else set()
+        base = [s for s in q if s.get("id") != current and int(s["id"]) not in waiting
+                and int(s.get("prio", 0)) in (0, NOMINEE_PRIO) and not self.resting(s["file"], now)
+                and s["file"] not in in_round]
+        recent = set(self.recent[-RECENT_MAX:])
+        eligible = [s for s in base if s["file"] not in recent] or base
+        pick = next((s for s in q if int(s["id"]) == self.nominee["id"]), None)
+        if pick:
+            self.plan_outlook(eligible, pick, now, len(q), len(base))
 
     async def on_message(self, d, verb, args):
         if verb == "on":
