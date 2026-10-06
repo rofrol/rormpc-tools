@@ -193,6 +193,85 @@ def test_entries_skipped_past_between_wakes_count_as_played():
     assert player.read_state("upnext")["entries"] == []
 
 
+@pytest.mark.parametrize("random", [False, True])
+@pytest.mark.parametrize("verb", ["play", "playnow"])
+def test_failed_playid_keeps_request_and_reports_error(monkeypatch, random, verb):
+    from mpd.base import CommandError
+
+    d, mpd, u = setup(random=random)
+    send(d, mpd, "upnext add c", "upnext add x")
+    original = [e.copy() for e in u.entries]
+    current, playing = u.current, u.playing
+    playid = mpd.playid
+    calls = []
+
+    async def fail_playid(id_):
+        calls.append(id_)
+        raise CommandError("[50@0] {playid} No such song")
+
+    monkeypatch.setattr(mpd, "playid", fail_playid)
+    target = str(original[0]["id"]) if verb == "play" else original[0]["file"]
+    send(d, mpd, f"upnext {verb} {target}")
+    # send() also runs the next on_status with unchanged playback: it must not drop the failed request.
+    assert u.entries == original
+    assert u.current == current and u.playing == playing and mpd.cur == "1"
+    saved = player.read_state("upnext")
+    assert saved["entries"] == original and saved["playing"] == playing
+    assert "Cannot play c" in saved["error"] and "No such song" in saved["error"]
+    assert len(calls) == 1, "no automatic retry"
+    asyncio.run(d.step({"player"}))
+    assert u.entries == original and player.read_state("upnext")["error"] == saved["error"]
+    monkeypatch.setattr(mpd, "playid", playid)
+    send(d, mpd, f"upnext {verb} {target}")  # an explicit later user action, not an automatic retry
+    assert u.playing == original[0] and u.entries == original[1:]
+    assert player.read_state("upnext")["error"] is None
+
+
+@pytest.mark.parametrize("random", [False, True])
+def test_failed_new_playnow_keeps_added_song_waiting(monkeypatch, random):
+    from mpd.base import CommandError
+
+    d, mpd, u = setup(random=random)
+
+    async def fail_playid(id_):
+        raise CommandError("[50@0] {playid} No such song")
+
+    monkeypatch.setattr(mpd, "playid", fail_playid)
+    send(d, mpd, "upnext playnow x")
+    assert u.entries == [{"id": 5, "file": "x", "added": True}]
+    assert u.playing is None and u.current == 1 and mpd.cur == "1"
+    assert "Cannot play x" in player.read_state("upnext")["error"]
+    assert "x" in mpd.files(), "a failed start must not delete the added song"
+    asyncio.run(d.step({"player"}))
+    assert [e["file"] for e in u.entries] == ["x"], "a later wake must not treat a failed start as played"
+
+
+def test_failed_play_preserves_previous_added_song(monkeypatch):
+    from mpd.base import CommandError
+
+    d, mpd, u = setup()
+    send(d, mpd, "upnext playnow x", "upnext add c")
+    previous, current = u.playing.copy(), u.current
+    entries = [e.copy() for e in u.entries]
+
+    async def fail_playid(id_):
+        raise CommandError("[50@0] {playid} No such song")
+
+    monkeypatch.setattr(mpd, "playid", fail_playid)
+    send(d, mpd, f"upnext play {entries[0]['id']}")
+    assert u.entries == entries and u.playing == previous and u.current == current
+    assert "x" in mpd.files() and mpd.cur == str(current)
+    assert not any(call == ("deleteid", str(current)) for call in mpd.calls)
+
+
+def test_remove_then_play_stale_id_never_plays_neighbor():
+    d, mpd, u = setup()
+    send(d, mpd, "upnext add b", "upnext add c")
+    target = u.entries[0]["id"]
+    send(d, mpd, f"upnext remove {target}", f"upnext play {target}")
+    assert mpd.cur == "1" and [e["file"] for e in u.entries] == ["c"]
+
+
 def test_turning_random_on_keeps_the_waiting_entries():
     d, mpd, u = setup(random=False)
     send(d, mpd, "upnext add c")  # random off: moved after the current song, no priority

@@ -47,6 +47,10 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
 
 ## Invariants
 
+- An Up next request becomes playing only after MPD accepts `playid`. A rejected start keeps the waiting
+  request and previous playback intact and publishes `upnext.json` with an `error` for rormpc's Up next pane.
+  Newly added Play now songs are registered as waiting before the start, including their random-on priority;
+  a failed start is never mistaken for a completed play at the next daemon wake. There is no automatic retry.
 - The `plays` and `skips` stickers are space-padded on purpose: rmpc sorts sticker values as text. Do not "clean up"
   the padding.
 - `mbtag.http()` returns `None` on 404 and, by default, when retries run out; with `strict=True` it raises instead.

@@ -170,18 +170,21 @@ class UpNext(Module):
                 return
             waiting = next((e for e in self.entries if e["file"] == args), None)
             if waiting:
-                self.entries.remove(waiting)
                 await self.switch_to(d, waiting)
             elif queued:
                 await self.switch_to(d, None, int(queued[0]["id"]))
             else:
                 id_ = await self.add_to_queue(d, args, True)
-                await self.switch_to(d, {"id": id_, "file": args, "added": True})
+                entry = {"id": id_, "file": args, "added": True}
+                self.entries.append(entry)
+                # Establish a waiting request before starting it; a failed play must not leave priority 0,
+                # which a later random-on wake would mistake for a request already played.
+                await self.apply_order(d)
+                await self.switch_to(d, entry)
         elif verb == "play":
             e = self.find(args)
             if not e:
                 return
-            self.entries.remove(e)
             await self.switch_to(d, e)
         elif verb == "first":
             e = self.find(args)
@@ -211,10 +214,19 @@ class UpNext(Module):
 
     async def switch_to(self, d, entry, id_=None):
         """Play `entry` (or the source song `id_`) now; an Up next song that was playing has played."""
+        target = entry["id"] if entry else id_
+        try:
+            await d.mpd.playid(target)
+        except Exception as exc:
+            # A failed start is not a completed request: waiting and previous playback remain unchanged.
+            self.error = f"Cannot play {entry['file'] if entry else target}: {exc}"
+            self.save()
+            raise
         prev = self.playing
+        if entry and entry in self.entries:
+            self.entries.remove(entry)
         self.playing = entry
-        self.current = entry["id"] if entry else id_  # on_status must not take this start for a song change
-        await d.mpd.playid(self.current)
+        self.current = target  # on_status must not take this successful start for a song change
         if prev and prev["id"] != self.current:
             await self.finished(d, prev)
 
