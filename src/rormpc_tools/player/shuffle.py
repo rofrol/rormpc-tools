@@ -329,7 +329,7 @@ class Shuffle(Module):
             kind, rest_h = "late", REST_LATE_H
         self.rests[p["file"]] = max(self.rests.get(p["file"], 0), now + rest_h * 3600)
         self.live.append({"t": round(now), "file": p["file"], "kind": kind})
-        self.history = (self.history + [{"t": round(now), "file": p["file"], "kind": kind}])[-HISTORY_N:]
+        self.history = (self.history + [{"t": round(now), "id": p["id"], "file": p["file"], "kind": kind}])[-HISTORY_N:]
 
     async def song_started(self, d, s, now):
         cur = await d.mpd.currentsong()
