@@ -68,12 +68,42 @@ details { margin-top: 32px; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--grid); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.race-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0 10px; }
+.race-controls button, .race-controls select { font: inherit; padding: 3px 10px; border-radius: 5px;
+  border: 1px solid var(--grid); background: var(--surface-2); color: var(--text-primary); }
+.race-controls input[type=range] { flex: 1 1 240px; }
+.race-year { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.race-year.thin { color: var(--text-muted); }
+#race { position: relative; height: 300px; }
+#race .bar { position: absolute; left: 0; right: 0; height: 26px; display: grid;
+  grid-template-columns: minmax(0, 38%) 1fr; gap: 8px; align-items: center;
+  transition: top .6s ease, opacity .4s ease; }
+#race .bar span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right;
+  font-size: 12px; color: var(--text-primary); }
+#race .bar .track { display: flex; align-items: center; gap: 6px; min-width: 0; }
+#race .bar i { display: block; height: 22px; border-radius: 4px; background: var(--s1); min-width: 3px;
+  transition: width .6s ease; }
+#race .bar b { font-weight: 400; font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+#race.thin .bar i { background: var(--line-rest); }
+#race.thin .bar span { color: var(--text-muted); }
+@media (prefers-reduced-motion: reduce) { #race .bar, #race .bar i { transition: none; } }
 </style>
 </head>
 <body>
 <main>
   <h1>Most played songs over time</h1>
   <p class="sub" id="sub"></p>
+
+  <h2>My top 10, year by year</h2>
+  <p class="note" id="racenote"></p>
+  <div class="race-controls">
+    <button id="raceplay">Play</button>
+    <input type="range" id="racescrub" min="0" value="0" aria-label="Year">
+    <select id="racespeed" aria-label="Speed"><option value="2500">slow</option>
+      <option value="1500" selected>normal</option><option value="700">fast</option></select>
+    <span class="race-year" id="raceyear"></span>
+  </div>
+  <div id="race" role="img" aria-label="Top 10 songs by plays in each year"></div>
 
   <h2>Where the plays come from</h2>
   <p class="note" id="covnote"></p>
@@ -139,6 +169,67 @@ const x = i => L + (n === 1 ? 0 : i * (W - L - R) / (n - 1));
 const step = n > 1 ? (W - L - R) / (n - 1) : 20;
 
 // ---- coverage: stacked bars per period, one colour per source (fixed order)
+(function race() {
+  const R = D.race;
+  if (!R || !R.frames.length) return;
+  const box = document.getElementById("race"), scrub = document.getElementById("racescrub");
+  const play = document.getElementById("raceplay"), speed = document.getElementById("racespeed");
+  const yearEl = document.getElementById("raceyear");
+  document.getElementById("racenote").textContent =
+    `Plays per listening year, ${R.top} most played as bars. The weighted shuffle's own picks are left out ` +
+    `(${R.left_out} plays). Grey years have fewer than ${D.thin} plays: too few to trust the order. Sources ` +
+    `changed over the years (see below), which can look like a change in taste.`;
+  scrub.max = R.frames.length - 1;
+  const bars = new Map();
+  const ROW = 29;
+  function show(i) {
+    const f = R.frames[i];
+    scrub.value = i;
+    yearEl.textContent = f.year + (f.thin ? `  (${f.total} plays)` : "");
+    yearEl.classList.toggle("thin", f.thin);
+    box.classList.toggle("thin", f.thin);
+    const max = Math.max(1, ...f.top.map(t => t.plays));
+    const seen = new Set();
+    f.top.forEach((t, rank) => {
+      let b = bars.get(t.name);
+      if (!b) {
+        b = document.createElement("div");
+        b.className = "bar";
+        b.innerHTML = '<span></span><div class="track"><i></i><b></b></div>';
+        b.style.top = (R.top * ROW) + "px";
+        b.querySelector("i").style.width = "0";
+        box.appendChild(b);
+        bars.set(t.name, b);
+      }
+      seen.add(t.name);
+      b.style.opacity = "1";
+      b.style.top = (rank * ROW) + "px";
+      b.querySelector("i").style.width = `calc(${(t.plays / max) * 100}% - 40px)`;
+      b.querySelector("span").textContent = t.name;
+      b.querySelector("span").title = t.name;
+      b.querySelector("b").textContent = t.plays;
+    });
+    for (const [name, b] of bars) {
+      if (!seen.has(name)) { b.style.opacity = "0"; b.style.top = (R.top * ROW) + "px"; }
+    }
+  }
+  let timer = null;
+  function stop() { clearInterval(timer); timer = null; play.textContent = "Play"; }
+  function start() {
+    if (+scrub.value >= R.frames.length - 1) show(0);
+    play.textContent = "Pause";
+    timer = setInterval(() => {
+      const i = +scrub.value + 1;
+      if (i >= R.frames.length) return stop();
+      show(i);
+    }, +speed.value);
+  }
+  play.onclick = () => timer ? stop() : start();
+  scrub.oninput = () => { stop(); show(+scrub.value); };
+  speed.onchange = () => { if (timer) { stop(); start(); } };
+  show(R.frames.length - 1);
+})();
+
 (function coverage() {
   const H = 120, T = 6, Bm = 20, svg = document.getElementById("coverage");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.style.width = "100%";

@@ -6,6 +6,9 @@
 - Top 10 (most plays overall) as a bump chart: rank among all songs played in that quarter; the tooltip has the
   plays, since rank alone hides 5 vs 50. A quarter where a song wasn't played is a gap, not a zero.
 - Top 100 as small multiples: each song's share of that quarter's plays.
+- Race: my top 10 of each listening year as animated bars (play, pause, scrub, speed), like a bar chart race.
+  The weighted shuffle's own picks (mpd-player's auto.jsonl) are left out: they show what the algorithm chose.
+  Years with fewer than THIN plays are marked as thin.
 - Coverage strip: plays per quarter by source. Sources changed over the years (Spotify export, then MPD and
   ListenBrainz), and that looks like a change in taste; quarters with fewer than 30 plays are greyed out and left
   out of the shares.
@@ -106,6 +109,56 @@ def compute(events, kind, resolve=lambda e: None):
             "events": sum(c["total"] for c in coverage)}
 
 
+RACE_TOP = 10
+
+
+def auto_index():
+    """{name key: [start times]} of the weighted shuffle's own picks, keyed like the plays (artist + title)."""
+    from .musicdb import auto_starts, mpd, name_key, one
+    starts = auto_starts()
+    if not starts:
+        return {}
+    tags = {s["file"]: (one(s.get("artist", "")), one(s.get("title", ""))) for s in mpd().listallinfo() if s.get("file")}
+    out = collections.defaultdict(list)
+    for f, ts in starts.items():
+        if all(tags.get(f, ("", ""))):
+            out[name_key(*tags[f])].extend(ts)
+    return out
+
+
+def compute_race(events, resolve=lambda e: None, auto=None):
+    """My top RACE_TOP per listening year, without the shuffle's own picks: [{year, total, thin, top: [{name,
+    plays}]}], plus how many plays were left out as the shuffle's."""
+    from .musicdb import name_key, ts_epoch
+    auto = auto or {}
+    local = {e["ts"] for e in events if e["source"] == "local"}
+    plays, names, left_out = collections.defaultdict(collections.Counter), collections.defaultdict(collections.Counter), 0
+    for e in events:
+        if e["source"] == "lb" and e["ts"] in local:
+            continue
+        artist, title = e.get("artist"), e.get("title")
+        if e["source"] in ("mpd", "local") or not (artist and title):
+            artist, title = resolve(e) or (None, None)
+        if not (artist and title):
+            continue
+        key = name_key(artist, title)
+        if key in auto:
+            t = ts_epoch(e["ts"])
+            if any(s - 120 <= t <= s + 1800 for s in auto[key]):
+                left_out += 1
+                continue
+        plays[e["ts"][:4]][key] += 1
+        names[key][f"{artist} - {title}"] += 1
+    years = [str(y) for y in range(int(min(plays)), int(max(plays)) + 1)] if plays else []
+    frames = []
+    for y in years:
+        c = plays.get(y, collections.Counter())
+        total = sum(c.values())
+        frames.append({"year": y, "total": total, "thin": total < THIN,
+                       "top": [{"name": names[k].most_common(1)[0][0], "plays": n} for k, n in c.most_common(RACE_TOP)]})
+    return {"frames": frames, "left_out": left_out, "top": RACE_TOP}
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="musicdb chart", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bucket", choices=["quarter", "month"], default="quarter")
@@ -120,6 +173,12 @@ def main(argv):
         print(f"warning: no MPD library ({err}); plays logged by file are left out", file=sys.stderr)
         resolve = lambda e: None
     data = compute(events, a.bucket, resolve)
+    try:
+        auto = auto_index()
+    except Exception as err:  # MPD down: the shuffle's picks can't be named, so none are left out
+        print(f"warning: the shuffle's picks are not left out ({err})", file=sys.stderr)
+        auto = {}
+    data["race"] = compute_race(events, resolve, auto)
     html = (pathlib.Path(__file__).with_name("chart.html").read_text()
             .replace("/*DATA*/null", json.dumps(data, ensure_ascii=False).replace("</", "<\\/")))
     out = pathlib.Path(a.output).expanduser()

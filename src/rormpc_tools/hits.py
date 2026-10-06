@@ -24,7 +24,7 @@ years only break ties. Genres come from the recording's
 MusicBrainz genres/tags, falling back to the artist's. Library matching and play counts reuse musicdb.
 Caches: ~/.cache/hits/.
 """
-import argparse, datetime as dt, json, math, os, pathlib, re, subprocess, sys, urllib.parse, urllib.request
+import argparse, datetime as dt, json, math, os, pathlib, re, subprocess, sys, time, urllib.parse, urllib.request
 
 from . import mbtag, musicdb, settings
 
@@ -87,21 +87,49 @@ def chart(year):
 
 # ---------------------------------------------------------------- MusicBrainz
 
+_cache_db = None
+
+
+def cache_db():
+    """One SQLite file for the MusicBrainz lookups and ListenBrainz popularity (it replaced ~1100 small JSON files
+    that every run opened: 1.5 s of a 3 s Apply)."""
+    global _cache_db
+    if _cache_db is None:
+        import sqlite3
+        CACHE.mkdir(parents=True, exist_ok=True)
+        _cache_db = sqlite3.connect(CACHE / "cache.sqlite3", isolation_level=None)
+        _cache_db.execute("PRAGMA journal_mode=WAL")
+        _cache_db.execute("CREATE TABLE IF NOT EXISTS mb (name TEXT PRIMARY KEY, json TEXT)")
+        _cache_db.execute("CREATE TABLE IF NOT EXISTS lb_pop (mbid TEXT PRIMARY KEY, listens INTEGER, fetched REAL)")
+        _cache_db.execute("CREATE TABLE IF NOT EXISTS health (service TEXT PRIMARY KEY, down_until REAL)")
+    return _cache_db
+
+
 def cached(name, fn):
+    """A MusicBrainz lookup, computed once. Entries from the old per-file cache move into SQLite when first read."""
+    db = cache_db()
+    row = db.execute("SELECT json FROM mb WHERE name = ?", (name,)).fetchone()
+    if row:
+        return json.loads(row[0])
     f = CACHE / "mb" / (re.sub(r"[^\w.-]", "_", name)[:180] + ".json")
-    if f.exists():
-        return json.loads(f.read_text())
-    f.parent.mkdir(parents=True, exist_ok=True)
-    r = fn()
-    f.write_text(json.dumps(r, ensure_ascii=False))
+    r = json.loads(f.read_text()) if f.exists() else fn()
+    db.execute("INSERT OR REPLACE INTO mb VALUES (?, ?)", (name, json.dumps(r, ensure_ascii=False)))
     return r
 
 
 main_artist = mbtag.main_artist
 
 
+MATCH_VERSION = 1  # bump when _mb_song's choice changes: cached choices of the old rule are not reused
+
+
 def mb_song(title, artist, year):
-    """Best MB recording for a chart entry: {mbid, artist_mbid, first, tags} or {}."""
+    """Best MB recording for a chart entry: {mbid, artist_mbid, first, tags} or {}. The choice is cached (parsing
+    the search result and fuzzy-matching it again took most of a warm run)."""
+    return cached(f"m{MATCH_VERSION}-{artist}-{title}-{year}", lambda: _mb_song(title, artist, year))
+
+
+def _mb_song(title, artist, year):
     def search():
         q = f'recording:"{title}" AND artist:"{main_artist(artist)}"'
         return mbtag.http("https://musicbrainz.org/ws/2/recording?" + urllib.parse.urlencode({"query": q, "limit": 25, "fmt": "json"})) or {}
@@ -164,20 +192,43 @@ def MANUAL_GENRES():
     return _manual
 
 
+LB_POP_TTL_D = 30  # popularity moves slowly; it only breaks ties in the chart ranking
+LB_DOWN_MIN = 20  # after a failed request, ListenBrainz is not asked again for this long (no waiting on every Apply)
+
+
 def lb_popularity(mbids):
-    """ListenBrainz listen counts, only a tie-breaker: when LB is slow or down, warn and rank without it."""
-    out = {}
-    mbids = [m for m in mbids if m]
-    for i in range(0, len(mbids), 100):
-        # optional tie-breaker: fail fast (2 tries x 8 s) instead of holding up the whole ranking
+    """ListenBrainz listen counts, only a tie-breaker. Cached per MBID for LB_POP_TTL_D days; only missing or
+    stale ones are fetched, with one attempt and a short timeout; when LB fails it is left alone for LB_DOWN_MIN
+    minutes and the ranking uses what the cache has (a timeout never becomes "0 listens")."""
+    db, now = cache_db(), time.time()
+    mbids = sorted({m for m in mbids if m})
+    out, missing = {}, []
+    for i in range(0, len(mbids), 500):
+        part = mbids[i:i + 500]
+        rows = db.execute(f"SELECT mbid, listens, fetched FROM lb_pop WHERE mbid IN ({','.join('?' * len(part))})",
+                          part).fetchall()
+        got = {m: (n, t) for m, n, t in rows}
+        for m in part:
+            if m in got:
+                out[m] = got[m][0]
+            if m not in got or now - got[m][1] > LB_POP_TTL_D * 86400:
+                missing.append(m)
+    down = db.execute("SELECT down_until FROM health WHERE service = 'lb_pop'").fetchone()
+    if missing and down and down[0] > now:
+        return out
+    for i in range(0, len(missing), 100):
         r = mbtag.http("https://api.listenbrainz.org/1/popularity/recording", host_interval=0.5,
-                       data=json.dumps({"recording_mbids": mbids[i:i + 100]}).encode(),
-                       headers={"Content-Type": "application/json"}, attempts=2, timeout=8)
+                       data=json.dumps({"recording_mbids": missing[i:i + 100]}).encode(),
+                       headers={"Content-Type": "application/json"}, attempts=1, timeout=2.5)
         if r is None:
-            print("warning: ListenBrainz popularity unavailable, ties broken by chart data only", file=sys.stderr)
-            return {}
+            db.execute("INSERT OR REPLACE INTO health VALUES ('lb_pop', ?)", (now + LB_DOWN_MIN * 60,))
+            print(f"warning: ListenBrainz popularity unavailable; using the cache, not asking again for "
+                  f"{LB_DOWN_MIN} min", file=sys.stderr)
+            break
         for x in r:
-            out[x["recording_mbid"]] = x.get("total_listen_count") or 0
+            n = x.get("total_listen_count") or 0
+            out[x["recording_mbid"]] = n
+            db.execute("INSERT OR REPLACE INTO lb_pop VALUES (?, ?, ?)", (x["recording_mbid"], n, now))
     return out
 
 
@@ -350,34 +401,80 @@ def ranked(years, a, lib):
     return rows if top or not a.owned else rows[: a.n]
 
 
-def likes_rows(years, a, lib, plays, last):
-    """Source "likes": library songs with rmpc's like sticker = 2, not a chart. Ranked by own plays (--sort plays)
-    or by "rediscover" (liked, played a lot, not lately); decade/genre filters still apply, Top % is within the set."""
+def library_songs():
+    """Every library song's tags from MPD in one call: {file: song dict as the sources below use it}."""
     from mpd import MPDClient
     c = MPDClient(); c.connect(os.environ.get("MPD_HOST", "localhost"), int(os.environ.get("MPD_PORT", 6600)))
-    liked = [x["file"] for x in c.sticker_find("song", "", "like") if x.get("sticker", "").endswith("=2")]
-    ok, wanted, rows = genre_filter(a.genre), set(years or []), []
-    now = dt.datetime.now()
-    for f in liked:
-        tags = (c.find("file", f) or [{}])[0]
-        one = lambda k: (tags.get(k)[0] if isinstance(tags.get(k), list) else tags.get(k)) or ""
+    liked = {x["file"] for x in c.sticker_find("song", "", "like") if x.get("sticker", "").endswith("=2")}
+    out = {}
+    for t in c.listallinfo():
+        f = t.get("file")
+        if not f:
+            continue
+        one = lambda k: (t.get(k)[0] if isinstance(t.get(k), list) else t.get(k)) or ""
         year = int(one("date")[:4]) if one("date")[:4].isdigit() else None
-        if wanted and year not in wanted:
-            continue
-        artist_mbid = one("musicbrainz_artistid")
-        s = {"artist": one("artist") or f, "title": one("title") or pathlib.Path(f).stem, "file": f, "year": year or 0,
-             "years": [year] if year else [], "mbid": one("musicbrainz_trackid") or None, "artist_mbid": artist_mbid or None,
-             "tags": [], "points": plays.get(f, 0), "peak": plays.get(f, 0), "listens": 0, "hidden": False}
-        if a.genre and not ok(genres(s)):
-            continue
-        idle_days = (now - dt.datetime.fromisoformat(last[f])).days if last.get(f) else 3650
-        s["score"] = math.log1p(s["points"]) * min(idle_days, 365) if a.sort == "rediscover" else s["points"]
-        rows.append(s)
+        out[f] = {"artist": one("artist") or f, "title": one("title") or pathlib.Path(f).stem, "file": f,
+                  "year": year or 0, "years": [year] if year else [], "mbid": one("musicbrainz_trackid") or None,
+                  "artist_mbid": one("musicbrainz_artistid") or None, "tags": [], "listens": 0, "hidden": False,
+                  "liked": f in liked}
+    return out
+
+
+def rank_rows(rows, a):
+    """Rank by "score" (then artist, title), number them, cut by Top % or -n."""
     rows.sort(key=lambda s: (-s["score"], s["artist"], s["title"]))
     for i, s in enumerate(rows, 1):
         s["rank"], s["pct"], s["cohort"] = i, round(100 * i / len(rows), 1), len(rows)
     top = parse_top(a.top)
     return [s for s in rows if in_top(s["rank"], len(rows), top)] if top else rows[: a.n]
+
+
+def likes_rows(years, a, lib, plays, last, only_liked=True):
+    """Sources "likes" (library songs with rmpc's like sticker = 2) and "library" (every library song): not a chart.
+    Ranked by own plays (--sort plays) or by "rediscover" (played a lot, not lately); the period filters the
+    songs' release year, genres apply, Top % is within the set."""
+    ok, wanted, rows = genre_filter(a.genre), set(years or []), []
+    now = dt.datetime.now()
+    for f, s in library_songs().items():
+        if only_liked and not s["liked"]:
+            continue
+        if wanted and s["year"] not in wanted:
+            continue
+        s.update(points=plays.get(f, 0), peak=plays.get(f, 0))
+        if a.genre and not ok(genres(s)):
+            continue
+        idle_days = (now - dt.datetime.fromisoformat(last[f])).days if last.get(f) else 3650
+        s["score"] = math.log1p(s["points"]) * min(idle_days, 365) if a.sort == "rediscover" else s["points"]
+        rows.append(s)
+    return rank_rows(rows, a)
+
+
+MINE_THIN = 30  # plays in the chosen listening years below which "my charts" says the data is thin
+
+
+def mine_rows(years, a, lib):
+    """Source "mine": my own charts, songs ranked by how often I played them in the chosen LISTENING years (all
+    years when none is chosen), from the play history. The weighted shuffle's own picks are left out (they show
+    what the algorithm chose, not me). Genres apply; Top % is within the set."""
+    stamps = {}
+    musicdb.counted(musicdb.db(), lib, stamps)
+    auto = musicdb.auto_starts()
+    songs, wanted, ok = library_songs(), set(years or []), genre_filter(a.genre)
+    rows, total = [], 0
+    for f, ts_list in stamps.items():
+        own = [musicdb.ts_epoch(t) for t in ts_list]
+        picks = auto.get(f, [])
+        kept = [t for t, e in zip(ts_list, own) if not any(p - 120 <= e <= p + 1800 for p in picks)]
+        n = sum(1 for t in kept if not wanted or int(t[:4]) in wanted)
+        if not n or f not in songs:
+            continue
+        s = dict(songs[f], points=n, peak=n, score=n)
+        if a.genre and not ok(genres(s)):
+            continue
+        total += n
+        rows.append(s)
+    a.mine_plays = total
+    return rank_rows(rows, a)
 
 
 RECS_SEEDS = 8  # most played artists used as seeds
@@ -490,7 +587,7 @@ def show(a):
         years = sorted({y for part in a.years.split(",") if part.strip()
                         for y in range_years(part.strip())})
         groups = [(a.years, years)]
-    elif a.source in ("likes", "recs") and not a.decade:
+    elif a.source in ("likes", "recs", "library", "mine") and not a.decade:
         groups = [("all years", [])]
     else:
         groups = [(d, decade_years(d)) for d in (DECADES if a.decade == "all" else [a.decade or sys.exit("give a decade or --years")])]
@@ -501,16 +598,30 @@ def show(a):
              + (" per decade" if a.decade == "all" and not a.years else "") + (" owned" if a.owned else "")
              + (" by listens" if a.rank == "listens" else ""))
     rows = []
-    if a.source == "likes":
+    if a.source == "mine":
+        # listening years, the current one included (partial): not capped like the finished year-end charts
+        def listening(part):
+            lo, _, hi = part.strip().partition("-")
+            return range(int(lo), int(hi or lo) + 1)
+        if a.years:
+            groups = [(a.years, sorted({y for p in a.years.split(",") if p.strip() for y in listening(p)}))]
+        elif a.decade and a.decade != "all":
+            d = decade_years(a.decade)
+            groups = [(a.decade, list(range(d[0] - d[0] % 10, d[0] - d[0] % 10 + 10)))]
+        label = label.replace("Hits ", "My charts ", 1) + " · listening years, my plays (the shuffle's picks left out)"
+    if a.source in ("likes", "library"):
         plays_last = musicdb.counted(musicdb.db(), lib)
         plays, last = plays_last[0], plays_last[1]
-        label = label.replace("Hits ", "Likes ", 1) + (" · by plays" if a.sort == "plays" else " · rediscover")
+        label = (label.replace("Hits ", "Likes " if a.source == "likes" else "Library ", 1)
+                 + (" · by plays" if a.sort == "plays" else " · rediscover"))
     if a.source == "recs":
         label = label.replace("Hits ", "Recommendations ", 1) + " · LB Radio, similar to your most played artists"
     print(f"# {label}   ✓ = in library, plays = your play count")
     for d, years in groups:
-        part = (likes_rows(years, a, lib, plays, last) if a.source == "likes" else recs_rows(a, lib, plays)
-                if a.source == "recs" else ranked(years, a, lib))
+        part = (likes_rows(years, a, lib, plays, last) if a.source == "likes"
+                else likes_rows(years, a, lib, plays, last, only_liked=False) if a.source == "library"
+                else mine_rows(years, a, lib) if a.source == "mine"
+                else recs_rows(a, lib, plays) if a.source == "recs" else ranked(years, a, lib))
         if a.source != "billboard":  # no cohort beyond the rows themselves
             for k, (name, n) in count_artists(part).items():
                 a.cohort_artists.setdefault(k, [name, 0])[1] += n
@@ -596,6 +707,11 @@ def write_json(a, label, rows, plays):
                     "owned": a.owned, "rank": a.rank,
                     "show_hidden": a.show_hidden, "source": a.source, "sort": a.sort},
            "rank_note": ("more of your most played artists point to it; then they take turns" if a.source == "recs"
+                         else (f"rank by my plays in these listening years ({getattr(a, 'mine_plays', 0)} plays"
+                               + (": thin data, a ranking of few plays" if getattr(a, "mine_plays", 0) < MINE_THIN else "")
+                               + ")") if a.source == "mine"
+                         else "rank by your plays among all library songs" if a.source == "library" and a.sort == "plays"
+                         else "library songs often played, not lately" if a.source == "library"
                          else "rank by your plays among liked songs" if a.source == "likes" and a.sort == "plays"
                          else "liked, often played, not lately" if a.source == "likes"
                          else "best year-end chart position within the chosen years and genres"),
@@ -651,9 +767,11 @@ def main():
     ap.add_argument("--top", help='percent ranges of the ranking, e.g. "1-10" or "11-20,21-50" (instead of -n)')
     ap.add_argument("--json", metavar="PATH", help="also write the result as JSON (for rormpc's Hits pane)")
     ap.add_argument("--show-hidden", action="store_true", help="include songs hidden with `hits hide` (marked)")
-    ap.add_argument("--source", choices=["billboard", "likes", "recs"], default="billboard",
+    ap.add_argument("--source", choices=["billboard", "likes", "recs", "library", "mine"], default="billboard",
                     help="billboard: US year-end charts; likes: your liked songs (rmpc like sticker); "
-                         "recs: songs of artists similar to your most played ones (ListenBrainz Radio)")
+                         "recs: songs of artists similar to your most played ones (ListenBrainz Radio); "
+                         "library: every library song by your plays; "
+                         "mine: your own charts, by your plays in the chosen listening years")
     ap.add_argument("--sort", choices=["plays", "rediscover"], default="plays", help="order for --source likes")
     ap.add_argument("-n", type=int, default=100, help="how many (10/100/1000)")
     ap.add_argument("-g", "--genre", default="", help='e.g. "rock -country" or "hip hop, r&b"')
