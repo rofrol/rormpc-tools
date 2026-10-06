@@ -118,3 +118,108 @@ def test_an_mpd_error_in_one_module_does_not_stop_the_others():
     d = player.Daemon(mpd, [Broken(), g])
     run(d.step(set()))
     assert g.armed_for == "1"
+
+
+# mute: volume 0 for a while, the old volume back at the deadline
+
+class MixerMPD(FakeMPD):
+    async def setvol(self, v):
+        self.calls.append(("setvol", int(v)))
+        self.st["volume"] = str(v)
+
+
+def muted(status=None):
+    from rormpc_tools.player import mute
+    mpd = MixerMPD(status or {**PLAY, "volume": "88"})
+    m = mute.Mute()
+    d = player.Daemon(mpd, [m])
+    run(m.start(d))
+    return d, mpd, m
+
+
+def send(d, mpd, *msgs):
+    mpd.messages = list(msgs)
+    return run(d.step({"message"}))
+
+
+def test_mute_start_then_expiry_restores_the_volume(monkeypatch):
+    d, mpd, m = muted()
+    send(d, mpd, "mute start 300")
+    st = player.read_state("mute")
+    assert mpd.st["volume"] == "0" and st["volume"] == 88 and st["generation"] == 1 and st["error"] is None
+    assert st["deadline"] == pytest.approx(time.time() + 300, abs=1)
+    monkeypatch.setattr(time, "time", lambda: st["deadline"] + 0.1)
+    assert run(d.step(set())) is True
+    st = player.read_state("mute")
+    assert mpd.st["volume"] == "88" and st["deadline"] is None and st["last"] == "expired"
+    assert ("play",) not in mpd.calls  # expiry never starts playback
+
+
+def test_mute_survives_a_restart():
+    from rormpc_tools.player import mute
+    d, mpd, m = muted()
+    send(d, mpd, "mute start 60")
+    again = mute.Mute()
+    assert again.deadline() == m.deadline() and again.volume == 88
+
+
+def test_a_volume_set_during_the_mute_cancels_and_is_kept(monkeypatch):
+    d, mpd, m = muted()
+    send(d, mpd, "mute start 60")
+    mpd.st["volume"] = "40"  # mpc volume 40
+    run(d.step({"mixer"}))
+    assert m.deadline() is None and player.read_state("mute")["last"] == "overridden"
+    later = time.time() + 3600
+    monkeypatch.setattr(time, "time", lambda: later)
+    run(d.step(set()))
+    assert mpd.st["volume"] == "40"
+
+
+def test_stop_unmutes_at_once_pause_does_not():
+    d, mpd, m = muted()
+    send(d, mpd, "mute start 60")
+    mpd.st["state"] = "pause"
+    run(d.step({"player"}))
+    assert m.deadline() is not None and mpd.st["volume"] == "0"
+    mpd.st["state"] = "stop"  # end of the queue
+    run(d.step({"player"}))
+    assert m.deadline() is None and mpd.st["volume"] == "88"
+    assert player.read_state("mute")["last"] == "stopped"
+
+
+def test_extend_unmute_and_cancel():
+    d, mpd, m = muted()
+    send(d, mpd, "mute start 60")
+    first = m.deadline()
+    send(d, mpd, "mute extend 300")
+    assert m.deadline() == pytest.approx(first + 300)
+    send(d, mpd, "mute cancel")  # forget the timer, stay muted
+    assert m.deadline() is None and mpd.st["volume"] == "0"
+    send(d, mpd, "mute start 60", "mute unmute")
+    # still muted after cancel: a new start is refused (nothing to restore to), so unmute finds no mute
+    assert m.deadline() is None and mpd.st["volume"] == "0"
+    assert player.read_state("mute")["error"] == "not muted"
+
+
+def test_unmute_restores_and_start_again_moves_the_deadline():
+    d, mpd, m = muted()
+    send(d, mpd, "mute start 60")
+    send(d, mpd, "mute start 600")
+    assert m.deadline() == pytest.approx(time.time() + 600, abs=1) and m.volume == 88
+    send(d, mpd, "mute unmute")
+    assert mpd.st["volume"] == "88" and player.read_state("mute")["last"] == "unmuted"
+
+
+def test_mute_refusals_are_reported_in_the_state():
+    d, mpd, m = muted({**PLAY, "state": "stop", "volume": "88"})
+    send(d, mpd, "mute start 60")
+    assert player.read_state("mute")["error"] == "nothing is playing" and mpd.calls == []
+    d, mpd, m = muted({**PLAY, "volume": "-1"})
+    send(d, mpd, "mute start 60")
+    assert player.read_state("mute")["error"] == "MPD has no volume control"
+    for bad in ["mute start 0", "mute start x", "mute extend 60", "mute frob"]:
+        before = player.read_state("mute")["generation"]
+        send(d, mpd, bad)
+        st = player.read_state("mute")
+        assert st["generation"] == before + 1 and st["error"]
+    assert mpd.calls == []
