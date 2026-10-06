@@ -97,3 +97,27 @@ def test_shared_ok_silences_a_reviewed_shared_id(env):
 def test_markers_read_file_names_with_underscores():
     assert versions.markers("Tiësto_-_Adagio_For_Strings_(Live)") == ["live"]
     assert versions.markers("Deorro_-_Five_Hours_(Original_Mix)") == []
+
+
+def test_update_leaves_a_doctor_summary_for_rormpc(env, monkeypatch, tmp_path):
+    env(SONGS)
+    monkeypatch.setattr(doctor, "SUMMARY", tmp_path / "doctor.json")
+    musicdb.add_events([spotify("2015-01-01T10:00:00")])
+    assert doctor.write_summary().startswith("doctor: ambiguous-names 1")
+    s = json.loads((tmp_path / "doctor.json").read_text())
+    assert s["clean"] is False and s["counts"]["versions-open"] == 1
+    run("set", "spotify", URI, ORIG); run("label", ORIG, "original"); run("label", LIVE, "live")
+    assert doctor.write_summary() == "doctor: clean"
+
+
+def test_history_of_deleted_songs_is_not_stale_and_fix_cleans_their_playlist_lines(env):
+    env(SONGS)
+    gone = "Old/Bugi, Bugi.mp3"
+    musicdb.write_jsonl(musicdb.DONE, [{"file": gone}])
+    c = musicdb.db(); c.execute("INSERT INTO skips VALUES (?,?,?,?,?,?)", ("2026-09-27T10:00:00", gone, "", 1, 2, 1)); c.commit()
+    musicdb.PLAYLISTS.mkdir()
+    (musicdb.PLAYLISTS / "MacBook 2010.m3u").write_text(f"{ORIG}\n{gone}\n")
+    assert [s["where"] for s in doctor.check()["stale-paths"]] == ["playlist MacBook 2010"]
+    assert doctor.fix() == 1
+    assert (musicdb.PLAYLISTS / "MacBook 2010.m3u").read_text() == f"{ORIG}\n"
+    assert doctor.check()["stale-paths"] == []

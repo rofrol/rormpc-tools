@@ -163,6 +163,16 @@ def groups(include_all=False):
     return out
 
 
+def shared():
+    """YouTube ids / MBIDs on several library files not yet reviewed (doctor's shared-ids) with the files'
+    lengths: identical audio belongs to `musicdb dedupe`, one recording to `same`, a reviewed case to shared-ok,
+    a wrong tag to a tag fix."""
+    from . import doctor
+    info = song_info(musicdb.mpd())
+    return [{"id": d["id"], "files": [{"file": f, "duration_s": round(float(musicdb.one(info.get(f, {}).get("duration", 0)) or 0))}
+                                       for f in d["files"]]} for d in doctor.check()["shared-ids"]]
+
+
 def canon_all(fs, al):
     return [al.get(f, f) for f in fs]
 
@@ -280,6 +290,6 @@ def main(argv):
         return a.fn(a)
     gs = groups(a.all)
     if a.json:
-        print(json.dumps({"version": 1, "groups": gs}, ensure_ascii=False, indent=1))
+        print(json.dumps({"version": 1, "groups": gs, "shared": shared()}, ensure_ascii=False, indent=1))
     else:
         show(gs)

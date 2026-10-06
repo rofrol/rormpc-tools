@@ -12,11 +12,12 @@ Checks:
   local-orphans     scrobbler listens whose file is gone and that no YouTube id or MBID finds again
   stale-paths       skips, keep decisions, hand-made lists, likes and playlists naming files MPD does not have
   accounting        every event is credited to a file, unmatched, or a known duplicate: nothing vanishes
---strict exits 1 when any check finds something (for tests and hooks).
+--strict exits 1 when any check finds something (for tests and hooks). --fix removes playlist lines of songs
+deleted with `musicdb delete`, the only finding that is safe to repair without a decision.
 """
-import argparse, collections, json, sys
+import argparse, collections, datetime as dt, json, sys
 
-from . import musicdb, tags, versions
+from . import musicdb, settings, tags, versions
 
 
 def check():
@@ -63,30 +64,69 @@ def check():
     out["local-orphans"] = orphans
     out["versions-open"] = [{"name": g["name"], "open": g["pending"]} for g in versions.groups()]
 
-    stale, al = [], musicdb.aliases()
+    stale, al, gone = [], musicdb.aliases(), deleted()
+    # history of a song deleted through `musicdb delete` (skips, keep decisions, likes) is expected to name it
     for (f,) in c.execute("SELECT DISTINCT file FROM skips"):
-        if musicdb.canon(f, al) not in files:
+        if musicdb.canon(f, al) not in files and f not in gone:
             stale.append({"where": "skips", "file": f})
     for r in musicdb.jsonl(musicdb.DATA / "not-finished-keep.jsonl"):
-        if r.get("file") and musicdb.canon(r["file"], al) not in files:
+        if r.get("file") and musicdb.canon(r["file"], al) not in files and r["file"] not in gone:
             stale.append({"where": "not-finished-keep.jsonl", "file": r["file"]})
     for name, songs_in in tags.lists().items():
         for e in songs_in.values():
             if musicdb.canon(e["song"].get("file"), al) not in files:
                 stale.append({"where": f"list {name}", "file": e["song"].get("file")})
     for r in musicdb.jsonl(musicdb.DATA / "likes.jsonl"):
-        if r.get("file") not in files:
+        if r.get("file") not in files and r.get("file") not in gone:
             stale.append({"where": "likes.jsonl", "file": r.get("file")})
     if musicdb.PLAYLISTS.exists():
         for pl in sorted(musicdb.PLAYLISTS.glob("*.m3u")):
             for line in pl.read_text(errors="replace").splitlines():
                 if line and not line.startswith("#") and "://" not in line and line not in files:
-                    stale.append({"where": f"playlist {pl.stem}", "file": line})
+                    stale.append({"where": f"playlist {pl.stem}", "file": line}
+                                 | ({"fix": "deleted: musicdb doctor --fix removes it"} if line in gone else {}))
     out["stale-paths"] = stale
 
     out["accounting"] = {"events": total, "credited": credited, "unmatched": unmatched, "lb-copy-of-local": dup,
                          "ok": total == credited + unmatched + dup}
     return out
+
+
+def deleted():
+    """Files deleted through `musicdb delete` (the journal, finished and pending)."""
+    return {r["file"] for p in (musicdb.DONE, musicdb.PENDING) for r in musicdb.jsonl(p) if r.get("file")}
+
+
+def fix():
+    """Remove playlist lines naming files deleted through `musicdb delete`; nothing else is changed."""
+    gone, n = deleted(), 0
+    for pl in sorted(musicdb.PLAYLISTS.glob("*.m3u")) if musicdb.PLAYLISTS.exists() else []:
+        lines = pl.read_text(errors="surrogateescape").splitlines()
+        keep = [l for l in lines if l not in gone]
+        if keep != lines:
+            tmp = pl.with_name("." + pl.name + ".tmp")
+            tmp.write_text("".join(l + "\n" for l in keep), errors="surrogateescape")
+            tmp.replace(pl)
+            print(f"{pl.stem}: removed {len(lines) - len(keep)} deleted songs")
+            n += len(lines) - len(keep)
+    return n
+
+
+SUMMARY = settings.XDG_CACHE / "rormpc-tools" / "doctor.json"
+
+
+def write_summary(out=None):
+    """Counts per check into ~/.cache/rormpc-tools/doctor.json (atomic), for rormpc's status bar and for
+    `musicdb update`, which runs it hourly after imports, downloads and deletions. Returns a one-line summary."""
+    out = out or check()
+    bad = problems(out)
+    counts = {k: (len(v) if isinstance(v, list) else int(not v["ok"])) for k, v in bad.items()}
+    SUMMARY.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SUMMARY.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"version": 1, "at": dt.datetime.now().isoformat(timespec="seconds"),
+                               "clean": not bad, "counts": counts}))
+    tmp.replace(SUMMARY)
+    return "doctor: clean" if not bad else "doctor: " + ", ".join(f"{k} {n}" for k, n in counts.items())
 
 
 def problems(out):
@@ -98,8 +138,12 @@ def main(argv):
     ap.add_argument("--json", action="store_true")
     ap.add_argument("-v", action="store_true", help="list every finding, not the first 5 per check")
     ap.add_argument("--strict", action="store_true", help="exit 1 when anything is found")
+    ap.add_argument("--fix", action="store_true", help="remove playlist lines of songs deleted with musicdb delete")
     a = ap.parse_args(argv)
+    if a.fix:
+        fix()
     out = check()
+    write_summary(out)
     if a.json:
         print(json.dumps(out, ensure_ascii=False, indent=1))
     else:

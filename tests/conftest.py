@@ -50,6 +50,7 @@ def env(tmp_path, monkeypatch):
     for name, value in {"DB": tmp_path / "plays.db", "DATA": data, "PLAYLISTS": tmp_path / "playlists",
                         "LISTENS_LOG": tmp_path / "listens.jsonl", "SKIPS_LOG": tmp_path / "skips.jsonl",
                         "MPD_LOG": tmp_path / "mpd.log", "NF_KEEP": data / "not-finished-keep.jsonl",
+                        "DONE": data / "deletions" / "done.jsonl", "PENDING": data / "deletions" / "pending.jsonl",
                         "LB_CUTOFF": "2026-01-01T00:00:00"}.items():
         monkeypatch.setattr(musicdb, name, value)
     holder = {}

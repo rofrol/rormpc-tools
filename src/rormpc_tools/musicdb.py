@@ -654,10 +654,12 @@ def update(a):
     import_skips(a)
     import_local(a)
     network(import_lb, a)
-    sync(a)
+    network(sync, a)  # its last step sends likes to ListenBrainz: a timeout there must not skip the export
     network(lb_playlists, argparse.Namespace(user=None, n=0, download=False, all=False))
     network(youtube_index_daily)
     export(a)
+    from . import doctor
+    print(doctor.write_summary())
     if failed:
         sys.exit("failed: " + "; ".join(failed))
 
