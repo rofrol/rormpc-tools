@@ -121,3 +121,14 @@ def test_history_of_deleted_songs_is_not_stale_and_fix_cleans_their_playlist_lin
     assert doctor.fix() == 1
     assert (musicdb.PLAYLISTS / "MacBook 2010.m3u").read_text() == f"{ORIG}\n"
     assert doctor.check()["stale-paths"] == []
+
+
+def test_no_suggestion_when_lengths_and_markers_disagree():
+    rows = [{"file": LIVE, "duration_s": 218, "markers": ["live"], "version": None},
+            {"file": ORIG, "duration_s": 443, "markers": [], "version": None}]
+    t = {"title": "Adagio For Strings", "album": "A State Of Trance - 15 Years", "plays": 26, "longest_s": 207}
+    assert versions.suggest(t, rows) is None  # unmarked title says original, 26 plays <= 3:27 say not 7:23
+    t = {**t, "longest_s": 440}
+    assert versions.suggest(t, rows)["file"] == ORIG
+    t = {**t, "title": "Adagio For Strings (Live)", "longest_s": 216}
+    assert versions.suggest(t, rows)["file"] == LIVE

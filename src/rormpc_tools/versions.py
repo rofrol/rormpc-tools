@@ -183,21 +183,40 @@ def musicdb_key(f, s):
     return f"yt:{y.group(1)}" if y else f"mb:{mb}" if mb else f"file:{f}"
 
 
+LEN_SLACK_S = 8  # a file a few seconds longer or shorter than the longest play (silence, fades) still fits
+
+
+def fits_length(t, r):
+    """Can the plays be of this file? No play is longer than the track; and with several plays, if even the
+    longest stopped before 60 % of the file, they were most likely of a shorter version."""
+    if t["longest_s"] < 60:
+        return True  # no length information
+    if t["longest_s"] > r["duration_s"] + LEN_SLACK_S:
+        return False
+    return not (t["plays"] >= 3 and t["longest_s"] < 0.6 * r["duration_s"])
+
+
 def suggest(t, rows):
-    """A candidate with its reason, only from evidence that points one way; never applied by itself."""
+    """A candidate with its reason, only when the markers and the play lengths point at the same single file;
+    never applied by itself. Conflicting evidence (Tiësto: no "live" in the title, but 26 plays never longer
+    than 3:27, while the unmarked file is 7:23) gives no suggestion."""
     want = markers(f"{t['title']} {t.get('album') or ''}")
     if want:
         hits = [r for r in rows if set(want) & set(r["markers"] + ([r["version"]] if r["version"] else []))]
     else:
         hits = [r for r in rows if not r["markers"] and r["version"] in (None, "original")]
-    reason = (f"title says {', '.join(want)}" if want else "no live/remix/edit marker in the title")
-    if t["longest_s"] >= 60:  # a full play bounds the track's length from below
-        close = [r for r in (hits or rows) if abs(r["duration_s"] - t["longest_s"]) <= 8]
-        if len(close) == 1:
-            return {"file": close[0]["file"], "reason": f"{reason}; longest play {t['longest_s']} s, file {close[0]['duration_s']} s"}
-    if len(hits) == 1:
-        return {"file": hits[0]["file"], "reason": reason}
-    return None
+    fit = [r for r in rows if fits_length(t, r)]
+    both = [r for r in hits if r in fit]
+    if len(both) != 1 or (t["longest_s"] >= 60 and len(fit) > 1 and len(hits) > 1):
+        return None
+    r = both[0]
+    reason = f"title says {', '.join(want)}" if want else "no live/remix/edit marker in the title"
+    if t["longest_s"] >= 60:
+        reason += f"; longest play {t['longest_s']} s, file {r['duration_s']} s"
+        others = [x for x in rows if x is not r and not fits_length(t, x)]
+        if others:
+            reason += "; " + ", ".join(f"{x['duration_s']} s does not fit" for x in others)
+    return {"file": r["file"], "reason": reason}
 
 
 def log(rows):
@@ -290,6 +309,7 @@ def main(argv):
         return a.fn(a)
     gs = groups(a.all)
     if a.json:
-        print(json.dumps({"version": 1, "groups": gs, "shared": shared()}, ensure_ascii=False, indent=1))
+        print(json.dumps({"version": 1, "music_dir": str(musicdb.MUSIC), "groups": gs, "shared": shared()},
+                         ensure_ascii=False, indent=1))
     else:
         show(gs)
