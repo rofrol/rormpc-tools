@@ -9,7 +9,7 @@ They work from the shell too; each one's usage is in its `--help`.
 | `musicdb` | play history (ListenBrainz, MPD log, Takeout, Spotify export) -> MPD stickers `plays`, `lastPlayed`, `skips`; likes to ListenBrainz; `delete` / `undo` behind rormpc's Ctrl-x / Ctrl-y |
 | `musicdb chart` | a standalone HTML page: how my most played songs rose and fell (top 10 ranks, top 100 shares, which source the plays come from) |
 | `musicdb lyrics` | lyrics from LRCLIB into `lyrics_dir` (`.lrc` synced, `.txt` plain) for rormpc's Lyrics pane; `candidates` / `use` pick another entry |
-| `mpd-gap` | seconds of silence between songs |
+| `mpd-player` | the playback daemon: seconds of silence between songs, chosen in rormpc (`gap set N` over MPD messages, channel `rormpc`); see its `--help` |
 | `yt-mp3-mb` | YouTube -> mp3 identified on MusicBrainz, tagged, cover embedded |
 | `yt-playlist` | your YouTube playlists through the YouTube Data API (OAuth), for removing deleted songs |
 
@@ -18,7 +18,7 @@ They work from the shell too; each one's usage is in its `--help`.
     uv tool install 'rormpc-tools @ git+https://github.com/rofrol/rormpc-tools@v0.1.6'
 
 rormpc's `scripts/rormpc_install.sh companions` installs the pinned version and runs `musicdb update` hourly
-(and the scrobbler and `mpd-gap`) as launchd agents or systemd user units. For a checkout:
+(and the scrobbler and `mpd-player`) as launchd agents or systemd user units. For a checkout:
 `uv tool install --editable .`.
 
 Needs MPD with `sticker_file` set (stickers hold the counts), `mpc`; `yt-mp3-mb` needs `yt-dlp` and `ffmpeg`,
