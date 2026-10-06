@@ -44,6 +44,7 @@ COOLDOWN_DAYS = [1, 3, 7, 14]
 COOLDOWN_MEMORY_DAYS = 30
 FINISHED_SHARE = 0.8
 PLAN_N = 10
+HISTORY_N = 20
 # the plan's MPD priorities: plan[k] gets PLAN_N - k (10..1), below the Up next requests (255, 254, ...), so MPD
 # itself plays the plan in order (also after "next" on a phone, and for 10 songs if this daemon stops)
 OWN_PRIOS = range(1, PLAN_N + 1)
@@ -64,6 +65,7 @@ class Shuffle(Module):
         self.rests = saved.get("rests", {})  # after a play or a skip: {file: until}
         self.recent = saved.get("recent", [])
         self.live = saved.get("live", [])  # outcomes seen since weights.json: [{t, file, kind}]
+        self.history = saved.get("history", [])  # the last HISTORY_N plays with their outcome, for rormpc
         self.cycle = saved.get("cycle", [])
         self.new_today = saved.get("new_today", {"day": today(), "n": 0})
         self.round = saved.get("round")
@@ -78,7 +80,7 @@ class Shuffle(Module):
     def save(self):
         write_state("shuffle", {
             "enabled": self.enabled, "plan": self.plan, "nominee": self.nominee, "cooldown": self.cooldown,
-            "rests": self.rests, "recent": self.recent, "live": self.live, "cycle": self.cycle,
+            "rests": self.rests, "recent": self.recent, "live": self.live, "history": self.history, "cycle": self.cycle,
             "new_today": self.new_today, "round": self.round, "active": self.active, "reason": self.reason})
 
     @property
@@ -327,6 +329,7 @@ class Shuffle(Module):
             kind, rest_h = "late", REST_LATE_H
         self.rests[p["file"]] = max(self.rests.get(p["file"], 0), now + rest_h * 3600)
         self.live.append({"t": round(now), "file": p["file"], "kind": kind})
+        self.history = (self.history + [{"t": round(now), "file": p["file"], "kind": kind}])[-HISTORY_N:]
 
     async def song_started(self, d, s, now):
         cur = await d.mpd.currentsong()

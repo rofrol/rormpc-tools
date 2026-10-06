@@ -126,6 +126,7 @@ def test_a_song_played_to_the_end_rests_twelve_hours(clock):
     clock[0] += 195
     play(d, mpd, "c")
     assert sh.live[-1]["kind"] == "finished" and sh.rests["b"] == pytest.approx(clock[0] + 12 * 3600)
+    assert sh.history[-1] == {"t": round(clock[0]), "file": "b", "kind": "finished"}  # rormpc's timeline
 
 
 def test_pause_does_not_count_as_playing(clock):
