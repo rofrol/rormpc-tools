@@ -182,12 +182,9 @@ def apply(groups, m=None):
             (musicdb.MUSIC / d).rename(dst)
             index.pop(d, None)
     lyrics.save(index)
-    al = musicdb.aliases()
-    c = musicdb.db()
-    for old, new in al.items():  # skips are history too, but keyed by path only: point them at the survivor
-        c.execute("UPDATE OR IGNORE skips SET file = ? WHERE file = ?", (new, old))
-    c.commit()
-    n = rewrite_playlists(al)
+    # skips keep their old path (the scrobbler's log is re-imported by (ts, file): a rewritten row would come back
+    # as a second skip); skipped() and not_finished() read them through the aliases
+    n = rewrite_playlists(musicdb.aliases())
     mpd_update()
     musicdb.sync(None)
     print(f"{len(groups)} groups, {sum(len(g['drop']) for g in groups)} copies moved to {QUARANTINE / day}, "

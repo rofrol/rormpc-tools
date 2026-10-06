@@ -71,6 +71,10 @@ def test_apply_merges_state_into_one_copy_and_loses_nothing(lib, tmp_path):
     plays, *_ = musicdb.counted(musicdb.db(), musicdb.library())
     assert dict(plays) == {A: 1}  # the play logged on B now counts on A
     assert m.stickers[A]["like"] == "2" and m.stickers[A]["skips"].strip() == "1"
+    musicdb.SKIPS_LOG.write_text(json.dumps({"ts": musicdb.epoch_of("2026-09-27T10:00:00"), "file": B}) + "\n")
+    musicdb.import_skips(None)  # the hourly re-import of the scrobbler's log must not add a second skip
+    musicdb.sync(None)
+    assert m.stickers[A]["skips"].strip() == "1"
     out = doctor.check()
     assert out["stale-paths"] == [] and out["shared-ids"] == [] and out["accounting"]["ok"]
     assert dedupe.plan(m) == []  # idempotent
