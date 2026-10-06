@@ -13,7 +13,8 @@ class PlayingMPD(QueueMPD):
         self.rand = bool(int(on))
 
     async def playlistinfo(self):
-        return [{"id": s["id"], "file": s["file"], **({"prio": str(s["prio"])} if s["prio"] else {})} for s in self.q]
+        return [{"id": s["id"], "file": s["file"], "pos": str(i), **({"prio": str(s["prio"])} if s["prio"] else {})}
+                for i, s in enumerate(self.q)]
 
     async def playlistid(self, id_):
         found = [x for x in await self.playlistinfo() if x["id"] == str(id_)]
@@ -181,3 +182,11 @@ def test_turning_it_on_turns_random_off_and_random_on_turns_it_off():
     asyncio.run(d.step({"options"}))
     assert not sh.enabled and sh.nominee is None
     assert shuffle.Shuffle().enabled is False
+
+
+def test_random_off_pick_follows_a_song_played_by_hand():
+    d, mpd, sh = setup(files=("a", "b", "c", "d", "e", "f"), weights={"e": 3}, random=False)
+    assert mpd.files()[:2] == ["a", "e"]
+    play(d, mpd, "c")  # Enter on another song: the pick is no longer next...
+    assert sh.nominee["file"] == "e"
+    assert mpd.files()[mpd.files().index("c") + 1] == "e"  # ...so it moves after the new current song

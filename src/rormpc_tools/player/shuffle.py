@@ -181,6 +181,12 @@ class Shuffle(Module):
             elif self.nominee.get("random", True) != random_on:
                 await self.withdraw(d)
                 dirty = True
+            elif not random_on and s.get("song") is not None:
+                # random off: the pick must stay right after the current song and the requests; playing another
+                # song by hand (or a queue edit) leaves it elsewhere, where it would not be next
+                waiting = len(self.upnext_ids(d))
+                if int(e.get("pos", -1)) != int(s["song"]) + 1 + waiting:
+                    await d.mpd.moveid(self.nominee["id"], f"+{waiting}")
         active, why = self.is_active(s)
         if active != self.active or (not active and why != self.reason):
             self.active, self.reason = active, why
