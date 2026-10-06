@@ -171,3 +171,15 @@ def test_reimport_in_another_system_zone_does_not_double_count(env, monkeypatch,
     finally:
         os.environ.pop("TZ"); time.tzset()
     assert counts() == {"cd/02 Take On Me.flac": 1}
+
+
+def test_listenbrainz_failure_in_sync_keeps_the_local_results(env, monkeypatch):
+    m = env(SONGS)
+    def down(c, scores):
+        raise TimeoutError("The read operation timed out")
+    monkeypatch.setattr(musicdb, "push_feedback", down)
+    musicdb.add_events([local("2026-09-26T10:00:00", RICK, YT, "mb-rick")])
+    with pytest.raises(TimeoutError):
+        musicdb.sync(None)
+    assert m.stickers[RICK]["playCount"] == "1"
+    assert (musicdb.PLAYLISTS / "Not finished.m3u").exists() and (musicdb.PLAYLISTS / "Skipped.m3u").exists()

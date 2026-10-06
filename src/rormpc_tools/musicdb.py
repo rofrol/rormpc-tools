@@ -576,12 +576,14 @@ def sync(_a):
                 m.sticker_delete("song", f, key)
             n += 1
     write_likes(m, files)
-    sent = push_feedback(c, {mbid: max(scores) for mbid, scores in likes.items()})  # duplicates: a like wins
-    print(f"{len(files)} songs, {sum(1 for f in files if plays.get(f))} with plays, "
-          f"{sum(1 for v in likes.values() if max(v) == 1)} liked, {n} sticker updates, {sent} LB feedback sent, "
-          f"{write_skipped_playlist(collections.Counter({f: k for f, k in skips.items() if f in files}))} in playlist Skipped, "
-          f"{len(candidates)} in Not finished")
+    skipped_n = write_skipped_playlist(collections.Counter({f: k for f, k in skips.items() if f in files}))
     write_playlist("Not finished", candidates)
+    print(f"{len(files)} songs, {sum(1 for f in files if plays.get(f))} with plays, "
+          f"{sum(1 for v in likes.values() if max(v) == 1)} liked, {n} sticker updates, "
+          f"{skipped_n} in playlist Skipped, {len(candidates)} in Not finished")
+    # the network last: a ListenBrainz failure must not cost the local results; unsent likes go next time
+    sent = push_feedback(c, {mbid: max(scores) for mbid, scores in likes.items()})  # duplicates: a like wins
+    print(f"{sent} LB feedback sent")
 
 
 def write_likes(m, files):
