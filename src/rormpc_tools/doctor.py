@@ -5,7 +5,10 @@
 Checks:
   lb-duplicates     one ListenBrainz listen stored twice (counted twice); `musicdb import-lb` merges them
   shared-ids        a YouTube id or recording MBID in several library files: its plays go to one copy only
-  ambiguous-names   plays matched by name to several files, so credited to none
+                    (`musicdb versions shared-ok ID` when that is right, else fix the wrong tag)
+  ambiguous-names   plays matched by name to several files and not decided, so credited to none
+  versions-open     `musicdb versions`: undecided tracks, unlabelled files sharing a name, decisions whose
+                    file is gone or whose group changed since (a download, a deletion)
   local-orphans     scrobbler listens whose file is gone and that no YouTube id or MBID finds again
   stale-paths       skips, keep decisions, hand-made lists, likes and playlists naming files MPD does not have
   accounting        every event is credited to a file, unmatched, or a known duplicate: nothing vanishes
@@ -13,7 +16,7 @@ Checks:
 """
 import argparse, collections, json, sys
 
-from . import musicdb, tags
+from . import musicdb, tags, versions
 
 
 def check():
@@ -31,11 +34,13 @@ def check():
             ids[f"yt:{y.group(1)}"].add(s["file"])
         if mb := musicdb.one(s.get("musicbrainz_trackid", "")):
             ids[f"mb:{mb}"].add(s["file"])
-    out["shared-ids"] = [{"id": k, "files": sorted(v)} for k, v in sorted(ids.items()) if len(v) > 1]
+    ok = versions.fold()["shared"]
+    out["shared-ids"] = [{"id": k, "files": sorted(v)} for k, v in sorted(ids.items()) if len(v) > 1 and k not in ok]
 
     local = {ts for (ts,) in c.execute("SELECT ts FROM events WHERE source = 'local'")}
     ambiguous, orphans, credited, unmatched, dup = collections.Counter(), [], 0, 0, 0
     lib_files = musicdb.library_files(lib)
+    musicdb.prepare(lib, lib_files)
     total = 0
     for src, ts, ytid, mbid, uri, artist, title, extra in c.execute(
             "SELECT source, ts, ytid, mbid, spotify_uri, artist, title, extra FROM events"):
@@ -43,18 +48,20 @@ def check():
         if src == "lb" and ts in local:
             dup += 1
             continue
-        f = musicdb.event_file(lib, lib_files, src, ytid, mbid, artist, title, extra)
+        f = musicdb.event_file(lib, lib_files, src, ytid, mbid, artist, title, extra, uri)
         if f:
             credited += 1
             continue
         unmatched += 1
         if src == "local":
             orphans.append({"ts": ts, "file": json.loads(extra or "{}").get("file")})
-        elif artist and title and len(lib[2].get(musicdb.name_key(artist, title), ())) > 1:
+        elif (artist and title and len(lib[2].get(musicdb.name_key(artist, title), ())) > 1
+              and musicdb.RESOLVE[0](src, uri, mbid, artist, title) is None):
             ambiguous[(artist, title)] += 1
     out["ambiguous-names"] = [{"artist": a, "title": t, "plays": n,
                                "files": sorted(lib[2][musicdb.name_key(a, t)])} for (a, t), n in ambiguous.most_common()]
     out["local-orphans"] = orphans
+    out["versions-open"] = [{"name": g["name"], "open": g["pending"]} for g in versions.groups()]
 
     stale, al = [], musicdb.aliases()
     for (f,) in c.execute("SELECT DISTINCT file FROM skips"):

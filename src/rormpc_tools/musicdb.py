@@ -21,6 +21,7 @@
   musicdb tag add|remove|list|of ...   # hand-made lists (God, melancholic, ...); musicdb tag --help
   musicdb genre add|exclude|reset GENRE --current   # correct a song's MusicBrainz genres
   musicdb chart [--bucket month] [--open]  # HTML page: how my most played songs rose and fell
+  musicdb versions --help               # which file a played track is, when several files share its name
   musicdb dedupe [--apply]              # one file per identical audio stream: state merged, copies quarantined
   musicdb doctor [--json] [-v]          # silent data errors: duplicate listens, songs in several files, paths
                                         # that no longer exist, plays credited to no file (read-only)
@@ -140,7 +141,7 @@ def export(_a):
             json.dumps({k: v for k, v in zip(cols, r) if v not in ("", None)}, ensure_ascii=False) + "\n" for r in rows))
     git = lambda *a: subprocess.run(["git", "-C", str(DATA), *a], capture_output=True, text=True)
     # the hand-written logs (tag lists, manual genres, hidden hits) are committed with the hourly export
-    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl", "likes.jsonl", "aliases.jsonl")
+    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl", "likes.jsonl", "aliases.jsonl", "versions.jsonl")
             if (DATA / f).exists()]
     git("add", "events.jsonl", "favorites.jsonl", "tombstones.jsonl", "skips.jsonl", "deletions", *logs)
     if git("diff", "--cached", "--quiet").returncode:
@@ -495,29 +496,48 @@ def library_files(lib):
     return set(lib[0].values()) | set(lib[1].values()) | {f for fs in lib[2].values() for f in fs}
 
 
-ALIASES_CACHE = {}  # aliases() for event_file, refreshed by counted()
+ALIASES_CACHE = {}  # aliases() for event_file, refreshed by prepare()
+RESOLVE = [None]  # versions.resolver() for event_file, refreshed by prepare()
 
 
-def event_file(lib, files, src, ytid, mbid, artist, title, extra):
-    """Library file of a play: the scrobbler's local log names it, other sources are matched."""
+def prepare(lib, files):
+    """Load the path aliases and the version decisions event_file reads; call before a pass over events."""
+    from . import versions
+    ALIASES_CACHE.clear(); ALIASES_CACHE.update(aliases())
+    RESOLVE[0] = versions.resolver(lib, files)
+
+
+def event_file(lib, files, src, ytid, mbid, artist, title, extra, uri=None):
+    """Library file of a play: the scrobbler's local log names it; then the YouTube id, the MBID, a decision
+    for its track (`musicdb versions`), and last the name when exactly one file has it."""
     if src == "local":
         f = json.loads(extra or "{}").get("file")
         if (f := ALIASES_CACHE.get(f, f)) in files:
             return f
-    return match(lib, ytid, mbid, artist, title)[0]
+    f, _ = match(lib, ytid, mbid)
+    if f:
+        return f
+    if artist and title and RESOLVE[0]:
+        from . import versions
+        d = RESOLVE[0](src, uri, mbid, artist, title)
+        if d == versions.NOT_OWNED:
+            return None
+        if d:
+            return d
+    return match(lib, None, None, artist, title)[0]
 
 
 def counted(c, lib):
     """{file: (count, last_ts)}, {file: favorite}, unmatched play keys, unmatched favorites."""
-    ALIASES_CACHE.clear(); ALIASES_CACHE.update(aliases())
     plays, last, unmatched = collections.Counter(), {}, collections.Counter()
     files = library_files(lib)
+    prepare(lib, files)
     local = {ts for (ts,) in c.execute("SELECT ts FROM events WHERE source = 'local'")}
     for src, ts, ytid, mbid, uri, artist, title, extra in c.execute(
             "SELECT source, ts, ytid, mbid, spotify_uri, artist, title, extra FROM events"):
         if src == "lb" and ts in local:
             continue  # the scrobbler's own listen, already counted from its local log
-        f = event_file(lib, files, src, ytid, mbid, artist, title, extra)
+        f = event_file(lib, files, src, ytid, mbid, artist, title, extra, uri)
         if src == "yt" and not f:
             continue  # plain YouTube watches that are not in the library are mostly not music
         if f:
@@ -736,13 +756,13 @@ def journal_lock():
 def describe(rel, rows, lib, m):
     """What deleting rel touches: its plays (all sources), recording MBID and video id."""
     files = library_files(lib)
-    ALIASES_CACHE.clear(); ALIASES_CACHE.update(aliases())
+    prepare(lib, files)
     info = (m.find("file", rel) or [{}])[0]
     y = YTID_IN_NAME.search(rel)
     return {"file": rel, "artist": one(info.get("artist", "")), "title": one(info.get("title", pathlib.Path(rel).stem)),
             "ytid": y.group(1) if y else None, "mbid": next((x for x, f in lib[1].items() if f == rel), None),
             "events": [dict(zip(EVENT_COLS, r)) for r in rows
-                       if event_file(lib, files, r[0], r[2], r[3], r[5], r[6], r[8]) == rel]}
+                       if event_file(lib, files, r[0], r[2], r[3], r[5], r[6], r[8], r[4]) == rel]}
 
 
 def plays_of(events):
@@ -1072,6 +1092,9 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "chart":
         from . import chart
         return chart.main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "versions":
+        from . import versions
+        return versions.main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "dedupe":
         from . import dedupe
         return dedupe.main(sys.argv[2:])

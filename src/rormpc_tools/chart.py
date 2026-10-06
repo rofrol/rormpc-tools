@@ -43,12 +43,13 @@ def all_buckets(first, last, kind):
 def library_names():
     """Resolver for plays that name only a file or video id (MPD log, the scrobbler's local log): (artist, title)
     from the MPD tags of the library file musicdb matches them to, else None."""
-    from .musicdb import event_file, library, library_files, mpd, one
+    from .musicdb import event_file, library, library_files, mpd, one, prepare
     lib = library()
     files = library_files(lib)
+    prepare(lib, files)
     tags = {s["file"]: (one(s.get("artist", "")), one(s.get("title", ""))) for s in mpd().listallinfo() if s.get("file")}
     def resolve(e):
-        f = event_file(lib, files, e["source"], e.get("ytid"), e.get("mbid"), e.get("artist"), e.get("title"), e.get("extra"))
+        f = event_file(lib, files, e["source"], e.get("ytid"), e.get("mbid"), e.get("artist"), e.get("title"), e.get("extra"), e.get("spotify_uri"))
         return tags.get(f) if f and all(tags.get(f, ("", ""))) else None
     return resolve
 

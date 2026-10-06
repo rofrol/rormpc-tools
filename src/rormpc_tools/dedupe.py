@@ -67,36 +67,37 @@ def tag_map(path):
 
 def plan(m=None):
     """[{hash, keep, drop: [...], like, tags: {drop: [keys]}, lyrics}] for every group of identical audio."""
-    from . import lyrics, tags
     m = m or musicdb.mpd()
     files = sorted(s["file"] for s in m.listallinfo() if s.get("file") and s["file"].lower().endswith((".mp3", ".flac")))
     groups = collections.defaultdict(list)
     for rel, h in hashes(files).items():
         groups[h].append(rel)
+    return [group_for(fs, m, h=h) for h, fs in sorted(groups.items(), key=lambda kv: sorted(kv[1])) if len(fs) > 1]
+
+
+def group_for(fs, m, keep=None, h=None, why="same audio"):
+    """What merging the files fs into one involves: the survivor (keep, else the copy with a like, then a
+    hand-made list, then the most tags), the like it ends with, tags and lyrics it takes from the others."""
+    from . import lyrics, tags
     listed = {e["song"]["file"] for songs in tags.lists().values() for e in songs.values()}
     index = lyrics.load()
-    out = []
-    for h, fs in sorted(groups.items(), key=lambda kv: sorted(kv[1])):
-        if len(fs) < 2:
-            continue
-        info = {}
-        for f in fs:
-            try:
-                st = m.sticker_list("song", f)
-            except Exception:
-                st = {}
-            info[f] = {"like": st.get("like"), "listed": f in listed, "ntags": len(tag_map(musicdb.MUSIC / f)[1]),
-                       "lyrics": index.get(f, {}).get("state") in ("synced", "plain")}
-        keep = min(fs, key=lambda f: (info[f]["like"] is None, not info[f]["listed"], -info[f]["ntags"], f))
-        drop = sorted(f for f in fs if f != keep)
-        likes = {info[f]["like"] for f in fs if info[f]["like"] is not None}
-        keys = set(tag_map(musicdb.MUSIC / keep)[1].keys())
-        out.append({"hash": h, "keep": keep, "drop": drop,
-                    "like": info[keep]["like"] if info[keep]["like"] is not None else next(iter(likes), None),
-                    "like_conflict": len(likes) > 1,
-                    "tags": {f: sorted(set(tag_map(musicdb.MUSIC / f)[1].keys()) - keys) for f in drop},
-                    "lyrics": None if info[keep]["lyrics"] else next((f for f in drop if info[f]["lyrics"]), None)})
-    return out
+    info = {}
+    for f in fs:
+        try:
+            st = m.sticker_list("song", f)
+        except Exception:
+            st = {}
+        info[f] = {"like": st.get("like"), "listed": f in listed, "ntags": len(tag_map(musicdb.MUSIC / f)[1]),
+                   "lyrics": index.get(f, {}).get("state") in ("synced", "plain")}
+    keep = keep or min(fs, key=lambda f: (info[f]["like"] is None, not info[f]["listed"], -info[f]["ntags"], f))
+    drop = sorted(f for f in fs if f != keep)
+    likes = {info[f]["like"] for f in fs if info[f]["like"] is not None}
+    keys = set(tag_map(musicdb.MUSIC / keep)[1].keys())
+    return {"hash": h, "why": why, "keep": keep, "drop": drop,
+            "like": info[keep]["like"] if info[keep]["like"] is not None else next(iter(likes), None),
+            "like_conflict": len(likes) > 1,
+            "tags": {f: sorted(set(tag_map(musicdb.MUSIC / f)[1].keys()) - keys) for f in drop},
+            "lyrics": None if info[keep]["lyrics"] else next((f for f in drop if info[f]["lyrics"]), None)}
 
 
 def merge_tags(keep, drop):
@@ -175,7 +176,7 @@ def apply(groups, m=None):
             index[keep] = index[g["lyrics"]]
         # the alias first: if the move below fails, the next run sees both files again and redoes the group
         tags.append(musicdb.DATA / "aliases.jsonl",
-                            [{"old": d, "new": keep, "why": "same audio", "md5": g["hash"], "at": now} for d in g["drop"]])
+                            [{"old": d, "new": keep, "why": g.get("why", "same audio"), "md5": g["hash"], "at": now} for d in g["drop"]])
         for d in g["drop"]:
             dst = QUARANTINE / day / d
             dst.parent.mkdir(parents=True, exist_ok=True)

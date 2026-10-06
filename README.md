@@ -77,6 +77,11 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
 - Merged or moved files are recorded in `aliases.jsonl` in data_dir (old path -> current path); history and
   logs keep the path they were written with and readers map it through `musicdb.canon()`. `musicdb dedupe`
   keeps one file per identical audio stream and writes these aliases.
+- A play matched only by a name that several files share is credited to none, until `musicdb versions`
+  decides it per source track (Spotify URI, recording MBID, or the name for id-less plays): a file, or "a
+  version I don't own". Decisions live in `versions.jsonl` (append-only) with the file's identity and the
+  group's files at the time; a gone file or a changed group sends the decision back for review, never to a
+  guessed file. Suggestions (markers, Spotify album, longest play vs file length) are shown, never applied.
 - `musicdb doctor` lists silent data errors (duplicate listens, a song in several files, plays credited to no
   file, paths that no longer exist); run it after anything that changes history or moves files.
 - Personal data (play history, exports, OAuth secrets, account names) never goes into this repository: it is
