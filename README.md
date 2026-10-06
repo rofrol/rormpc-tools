@@ -57,7 +57,8 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   restart to restore the canonical order; it never resumes an old patch. Partial priority failure publishes
   `publish_error`, restores in-memory order, and the ordinary next status reconciliation publishes recovery
   immediately when priorities again match. `updated_at` is refreshed at the existing `MAX_WAIT` (30 s) wake;
-  UI freshness lasts two heartbeats (60 s), and requires the live daemon channel as well.
+  UI freshness lasts two heartbeats (60 s), and requires the live daemon channel as well. `pid` is the daemon's
+  process: MPD sends no Subscription event when a client disconnects, so rormpc watches that process exit.
 
 - An Up next request becomes playing only after MPD accepts `playid`. A rejected start keeps the waiting
   request and previous playback intact and publishes `upnext.json` with an `error` for rormpc's Up next pane.

@@ -27,9 +27,9 @@ the next), `shuffle unheardenough FILE`, `shuffle newround`.
 Files: shuffle.json (state: enabled, plan [{id, file, lane, slot, why}], cycle (lanes not yet planned), new_today,
 rests, cooldown, recent, live outcomes, round, active, reason); auto.jsonl (one line per song this shuffle started: {start, file}), read by musicdb.
 """
-import datetime as dt, json, math, random, time
+import datetime as dt, json, math, os, random, time, uuid
 
-from . import Module, queue_entry, read_state, state_dir, write_state
+from . import MAX_WAIT, Module, queue_entry, read_state, state_dir, write_state
 
 LANES = ["familiar"] * 7 + ["rediscovery"] * 2 + ["new"]
 NEW_PER_DAY = 5
@@ -61,6 +61,15 @@ class Shuffle(Module):
         saved = read_state("shuffle") or {}
         self.enabled = saved.get("enabled", True)
         self.plan = saved.get("plan", [])
+        self.patch_base = saved.get("patch_base")
+        self.clear_patch()  # temporary overrides never survive a daemon restart
+        self._plan_source = self.source_scope()
+        self.session = uuid.uuid4().hex
+        self.revision = 0
+        self._signature = None
+        self.updated_at = 0
+        self.ack = None
+        self.publish_error = None
         self.cooldown = saved.get("cooldown", {})  # "heard enough": {file: {until, level}}
         self.rests = saved.get("rests", {})  # after a play or a skip: {file: until}
         self.recent = saved.get("recent", [])
@@ -77,11 +86,33 @@ class Shuffle(Module):
         self.rng = rng or random.Random()
         self._weights = (None, {"files": {}, "global_cadence": 14, "generated": 0})
 
+    def update_version(self):
+        signature = (self._plan_source, [(e["id"], e["file"], e.get("slot")) for e in self.plan])
+        if signature != self._signature:
+            self.revision += 1
+            self._signature = signature
+
+    @property
+    def plan_version(self):
+        return f"{self.session}:{self.revision}"
+
+    def clear_patch(self):
+        """Restore the surviving original order; a draw/removal/play invalidates the temporary override."""
+        if self.patch_base is not None:
+            by_id = {e["id"]: e for e in self.plan}
+            self.plan = [by_id[id_] for id_ in self.patch_base if id_ in by_id] + [
+                e for e in self.plan if e["id"] not in self.patch_base]
+            self.patch_base = None
+
     def save(self):
+        self.update_version()
+        self.updated_at = time.time()
         write_state("shuffle", {
             "enabled": self.enabled, "plan": self.plan, "nominee": self.nominee, "cooldown": self.cooldown,
             "rests": self.rests, "recent": self.recent, "live": self.live, "history": self.history, "cycle": self.cycle,
-            "new_today": self.new_today, "round": self.round, "active": self.active, "reason": self.reason})
+            "new_today": self.new_today, "round": self.round, "active": self.active, "reason": self.reason,
+            "plan_version": self.plan_version, "pid": os.getpid(), "updated_at": self.updated_at, "ack": self.ack,
+            "patch_base": self.patch_base, "publish_error": self.publish_error})
 
     @property
     def nominee(self):
@@ -126,9 +157,13 @@ class Shuffle(Module):
     def heard(self, file):
         return bool(self.info(file).get("heard")) or bool(self.live_times(file, "finished"))
 
-    def source_key(self):
+    def source_scope(self):
         src = (read_state("source") or {}).get("source") or {}
-        return f"{src.get('kind')}:{src.get('name')}" if src.get("kind") == "hits" else None
+        return src.get("kind"), src.get("name")
+
+    def source_key(self):
+        kind, name = self.source_scope()
+        return f"{kind}:{name}" if kind == "hits" else None
 
     def resting(self, file, now):
         c = self.cooldown.get(file)
@@ -227,6 +262,8 @@ class Shuffle(Module):
                   and not (c and c["until"] > now) and e["file"] not in in_round)
             (keep if ok else gone).append(e)
         self.plan = keep
+        if gone:
+            self.clear_patch()
         self.give_back(gone)
         return bool(gone)
 
@@ -252,6 +289,8 @@ class Shuffle(Module):
                     self.reason = f"round done: all {self.round['total']} heard (shuffle newround starts another)"
                     return
         recent = set(self.recent[-RECENT_MAX:])
+        if len(self.plan) < PLAN_N and base:
+            self.clear_patch()  # the first new draw, including a per-song top-up, expires the override
         while len(self.plan) < PLAN_N and base:
             eligible = [s for s in base if s["file"] not in recent] or base  # recent is soft
             lane = self.take_lane()
@@ -271,21 +310,34 @@ class Shuffle(Module):
         values are written, so a re-plan costs a few commands, not ten."""
         want = {e["id"]: PLAN_N - k for k, e in enumerate(self.plan)}
         waiting = self.upnext_ids(d)
-        for s in q:
-            sid, prio = int(s["id"]), int(s.get("prio", 0))
-            target = want.get(sid, 0 if prio in OWN_PRIOS and sid not in waiting else prio)
-            if target != prio:
-                await d.mpd.prioid(target, sid)
+        try:
+            for s in q:
+                sid, prio = int(s["id"]), int(s.get("prio", 0))
+                target = want.get(sid, 0 if prio in OWN_PRIOS and sid not in waiting else prio)
+                if target != prio:
+                    await d.mpd.prioid(target, sid)
+        except Exception as exc:
+            self.publish_error = str(exc)
+            self.save()  # never advertise a partially published forecast as live
+            raise
+        self.publish_error = None
 
     async def withdraw(self, d):
         """Give up the plan: its priorities are taken back and the lanes return."""
+        self.clear_patch()
         if self.plan:
-            for e in self.plan:
-                found = await queue_entry(d.mpd, e["id"])
-                if found and found.get("file") == e["file"] and int(found.get("prio", 0)) in OWN_PRIOS:
-                    await d.mpd.prioid(0, e["id"])
+            try:
+                for e in self.plan:
+                    found = await queue_entry(d.mpd, e["id"])
+                    if found and found.get("file") == e["file"] and int(found.get("prio", 0)) in OWN_PRIOS:
+                        await d.mpd.prioid(0, e["id"])
+            except Exception as exc:
+                self.publish_error = str(exc)
+                self.save()  # partial withdrawal is no more live than a partial swap publication
+                raise
             self.give_back(self.plan)
             self.plan = []
+        self.publish_error = None
 
     def is_active(self, s):
         if not self.enabled:
@@ -302,11 +354,17 @@ class Shuffle(Module):
 
     def ensure_round(self):
         """A Hits source has rounds; a new source starts a new one."""
-        key = self.source_key()
+        scope = self.source_scope()
+        key = f"{scope[0]}:{scope[1]}" if scope[0] == "hits" else None
+        source_changed = scope != self._plan_source
+        if source_changed:
+            self.clear_patch()
+            self._plan_source = scope
         if not key:
             self.round = None
         elif not self.round or self.round.get("source") != key:
             self.round = {"source": key, "heard": [], "total": 0, "done": False}
+        return source_changed
 
     # ------------------------------------------------------------ watching playback
 
@@ -353,6 +411,8 @@ class Shuffle(Module):
             gone = [e for e in self.plan if e["file"] == file]
             self.plan = [e for e in self.plan if e["file"] != file]
             self.give_back(gone)
+        if self.patch_base is not None and int(s["songid"]) in self.patch_base:
+            self.clear_patch()  # classify the played head against the effective order before restoring it
         self.playing = {"id": int(s["songid"]), "file": file, "played": float(s.get("elapsed", 0) or 0),
                         "last": now, "running": s.get("state") == "play", "origin": origin,
                         "duration": float(s.get("duration", 0) or cur.get("duration", 0) or 0)}
@@ -361,9 +421,9 @@ class Shuffle(Module):
             self.round["heard"].append(file)
 
     async def on_status(self, d, s, changed):
-        dirty = False
+        dirty = self.ensure_round()
+        publish_was_bad = self.publish_error is not None
         now = time.time()
-        self.ensure_round()
         random_on = s.get("random") == "1"
         if self.enabled and not random_on:
             if self.random_seen is None:
@@ -406,10 +466,57 @@ class Shuffle(Module):
             dirty = dirty or [e["id"] for e in self.plan] != before
         elif self.plan and q is not None:
             await self.publish(d, q)  # e.g. a plan kept across a restart: its priorities may be missing
-        if dirty:
-            self.save()
+        # Heartbeat on the daemon's existing MAX_WAIT wake (30 s), including pauses/stops; no new timer.
+        if dirty or (publish_was_bad and self.publish_error is None) or now - self.updated_at >= MAX_WAIT:
+            self.save()  # a recovered priority vector is published immediately, not after another heartbeat
+
+    async def swap_slots(self, d, args):
+        """Versioned adjacent swap. Acknowledgement is published only after MPD accepts every priority."""
+        parts = args.split()
+        token = parts[-1] if parts else ""
+        old, base, published, expired = None, None, False, False
+        try:
+            if len(parts) != 4:
+                raise ValueError("Expected swap VERSION ID_A ID_B TOKEN")
+            version, a, b, token = parts
+            # Messages are dispatched before the normal status refresh: reconcile external changes first.
+            d.status = await d.mpd.status()
+            await self.on_status(d, d.status, {"player", "playlist", "options"})
+            if version != self.plan_version:
+                raise ValueError("Forecast changed; review the new plan before moving it")
+            if not self.active or self.publish_error:
+                raise ValueError("No live weighted-shuffle forecast")
+            ids = [e["id"] for e in self.plan]
+            i, j = ids.index(int(a)), ids.index(int(b))
+            if abs(i - j) != 1:
+                raise ValueError("Only adjacent forecast slots can be swapped")
+            old, base = self.plan[:], self.patch_base
+            if self.patch_base is None:
+                self.patch_base = ids[:]
+            self.plan[i], self.plan[j] = self.plan[j], self.plan[i]
+            wanted = [(e["id"], e["file"]) for e in self.plan]
+            await self.publish(d, await d.mpd.playlistinfo())
+            published = True
+            self.update_version()
+            # MPD may advance or another client may edit it during the individual priority writes.
+            # Reconcile before acknowledging, never roll an expired snapshot back over newly played entries.
+            d.status = await d.mpd.status()
+            await self.on_status(d, d.status, {"player", "playlist", "options"})
+            if not self.active or self.patch_base is None or wanted != [(e["id"], e["file"]) for e in self.plan]:
+                expired = True
+                raise ValueError("Forecast changed during publication; the temporary patch expired")
+            self.ack = {"token": token, "ok": True, "error": None, "version": self.plan_version}
+        except Exception as exc:
+            if old is not None and not published:
+                self.plan, self.patch_base = old, base
+            elif published and not expired:
+                self.publish_error = str(exc)  # unverified/partial post-publication state must also be stale
+            self.ack = {"token": token, "ok": False, "error": str(exc)}
+        self.save()
 
     async def on_message(self, d, verb, args):
+        if verb == "swap":
+            return await self.swap_slots(d, args)
         if verb == "on":
             self.enabled = True
             if d.status.get("random") != "1":
@@ -434,6 +541,8 @@ class Shuffle(Module):
                 await self.withdraw(d)  # the head had the priority: plan again
             else:
                 self.plan = [e for e in self.plan if e["file"] != args]
+                if gone:
+                    self.clear_patch()
                 self.give_back(gone)
             cur = await d.mpd.currentsong()
             if cur.get("file") == args:
