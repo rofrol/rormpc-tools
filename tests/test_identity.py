@@ -108,3 +108,26 @@ def test_doctor_reports_unregistered_and_untagged_files(lib):
     assert {p["why"] for p in doctor.identity_problems([OLD, CD])} == {"id missing from the tags"}
     identity.sync(m)
     assert doctor.identity_problems([OLD, CD]) == []
+
+
+def test_state_kept_under_an_old_path_follows_a_rename(lib, tmp_path, monkeypatch):
+    from rormpc_tools import lyrics as ly
+    monkeypatch.setattr(ly, "LYRICS", tmp_path / "lyrics"); monkeypatch.setattr(ly, "INDEX", tmp_path / "lyrics" / "index.json")
+    from rormpc_tools import doctor
+    music, m = lib
+    identity.sync(m)
+    c = musicdb.db()
+    for day in ("2026-09-27", "2026-09-28"):
+        c.execute("INSERT INTO skips VALUES (?,?,?,?,?,?)", (f"{day}T10:00:00", OLD, "", 10, 200, 10))
+    c.commit()
+    musicdb.write_jsonl(musicdb.NF_KEEP, [{"file": OLD, "action": "keep"}])
+    from rormpc_tools import lyrics
+    lyrics.paths(OLD)[0].parent.mkdir(parents=True); lyrics.paths(OLD)[0].write_text("[00:01]la\n")
+    lyrics.save({OLD: {"state": "synced"}})
+    (music / OLD).rename(music / NEW); m.songs[0]["file"] = NEW
+    identity.sync(m)
+    assert lyrics.paths(NEW)[0].read_text() == "[00:01]la\n" and lyrics.load() == {NEW: {"state": "synced"}}
+    assert musicdb.canon(OLD) == NEW
+    assert musicdb.skipped(musicdb.db(), {}) == {NEW: 2}
+    assert musicdb.kept() == {NEW}
+    assert doctor.check()["stale-paths"] == []

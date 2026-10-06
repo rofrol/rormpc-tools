@@ -73,6 +73,13 @@ def aliases():
     """{old path: current path} from aliases.jsonl in data_dir: files merged into another copy (`musicdb dedupe`)
     or moved. History and logs keep the path they were written with; readers map it through canon()."""
     out = {r["old"]: r["new"] for r in jsonl(DATA / "aliases.jsonl")}
+    # the identity registry knows every path a file had (renames by anything, not only by these tools)
+    rows = identity.load()["rows"]
+    for r in rows.values():
+        now = r.get("path") if r.get("state") == "live" else (rows.get(r.get("into"), {}).get("path") if r.get("state") == "merged" else None)
+        for p in r.get("paths", []):
+            if now and p != now:
+                out.setdefault(p, now)
     for old in out:  # follow chains (a -> b -> c)
         seen = {old}
         while out[old] in out and out[old] not in seen:

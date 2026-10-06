@@ -189,6 +189,8 @@ def sync(m=None, dry_run=False, write=True):
                 r = rows[sid]
                 if r.get("path") != rel:
                     report["renamed"].append({"id": sid, "from": r.get("path"), "to": rel})
+                    if r.get("path") and not dry_run:
+                        move_lyrics(r["path"], rel)
                     r["path"], r["state"] = rel, "live"
                     r.pop("into", None)
                 if rel not in r["paths"]:
@@ -228,6 +230,23 @@ def sync(m=None, dry_run=False, write=True):
         if not dry_run:
             save(rows)
     return report
+
+
+def move_lyrics(old, new):
+    """rormpc finds lyrics by the song's path (lyrics_dir/<path>.lrc|.txt): they follow a renamed file."""
+    from . import lyrics
+    moved = False
+    for src, dst in zip(lyrics.paths(old), lyrics.paths(new)):
+        if src.exists() and not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(dst)
+            moved = True
+    index = lyrics.load()
+    if old in index and new not in index:
+        index[new] = index.pop(old)
+        lyrics.save(index)
+    elif moved:
+        lyrics.save(index)
 
 
 def summary(rep):
