@@ -1,5 +1,5 @@
-"""Weighted shuffle, a mode of its own next to MPD's plain random: the next song is chosen here and given MPD priority
-1, below the Up next requests (2-255), so a request always plays first. Priorities steer MPD only with random on, so
+"""Weighted shuffle, a mode of its own next to MPD's plain random: the next songs are chosen here and given MPD
+priorities 10..1, below the Up next requests (255, 254, ...), so a request always plays first. Priorities steer MPD only with random on, so
 this mode owns MPD's random: `shuffle on` turns random on, `shuffle off` turns it off (the queue plays in order);
 random turned off by any client (a phone, mpc) turns this off too; `shuffle release` turns this off and leaves plain
 random on (rormpc's x). Nothing in the queue is moved. Other clients see random on while this runs.
@@ -17,8 +17,8 @@ make favourites disappear): every 10 picks are a shuffled cycle of lanes, 7 fami
 - rests: after a song played to the end 12 h, after a late skip 12 h, after an early skip 48 h; "heard enough"
   (the e key) 1, 3, 7, then 14 days. The last 20 played are avoided when anything else is left.
 A lane with nothing eligible lends its turn to familiar, then rediscovery, then new, then any eligible song.
-The next PLAN_N songs are drawn ahead (the plan, in play order, shown by rormpc's Shuffle view); only the first has
-the MPD priority. A planned song leaves the plan when it plays, leaves the queue, is asked for with Play next, gets
+The next PLAN_N songs are drawn ahead (the plan, in play order) and published as MPD priorities PLAN_N..1, below the
+Up next requests, so MPD itself plays them in order; rormpc shows the plan in its ShuffleNext column and Shuffle view. A planned song leaves the plan when it plays, leaves the queue, is asked for with Play next, gets
 "heard enough" or is played by hand; its lane goes back for its replacement, and the plan is topped up at the end. When the source is a Hits result (rormpc's source.json kind
 "hits"), a round plays each song once (hard rule); when all were heard it stops and says so; `shuffle newround`.
 
@@ -44,7 +44,9 @@ COOLDOWN_DAYS = [1, 3, 7, 14]
 COOLDOWN_MEMORY_DAYS = 30
 FINISHED_SHARE = 0.8
 PLAN_N = 10
-NOMINEE_PRIO = 1
+# the plan's MPD priorities: plan[k] gets PLAN_N - k (10..1), below the Up next requests (255, 254, ...), so MPD
+# itself plays the plan in order (also after "next" on a phone, and for 10 songs if this daemon stops)
+OWN_PRIOS = range(1, PLAN_N + 1)
 
 
 def today():
@@ -219,7 +221,7 @@ class Shuffle(Module):
             s = by_id.get(e["id"])
             c = self.cooldown.get(e["file"])
             ok = (s is not None and s["file"] == e["file"] and e["id"] not in waiting
-                  and int(s.get("prio", 0)) in ((NOMINEE_PRIO, 0) if k == 0 else (0,))
+                  and int(s.get("prio", 0)) in (0, *OWN_PRIOS)
                   and not (c and c["until"] > now) and e["file"] not in in_round)
             (keep if ok else gone).append(e)
         self.plan = keep
@@ -227,7 +229,7 @@ class Shuffle(Module):
         return bool(gone)
 
     async def fill_plan(self, d, q=None):
-        """Top the plan up to PLAN_N draws (or explain why there is none) and give its head priority 1."""
+        """Top the plan up to PLAN_N draws (or explain why there is none) and publish its priorities."""
         q = q if q is not None else await d.mpd.playlistinfo()
         current = d.status.get("songid")
         now = time.time()
@@ -235,13 +237,15 @@ class Shuffle(Module):
         in_round = set(self.round["heard"]) if self.round else set()
         waiting = self.upnext_ids(d)
         planned = {e["file"] for e in self.plan}
-        base = [s for s in q if s.get("id") != current and int(s.get("prio", 0)) in (0, NOMINEE_PRIO)
+        base = [s for s in q if s.get("id") != current and int(s.get("prio", 0)) in (0, *OWN_PRIOS)
                 and int(s["id"]) not in waiting and not self.resting(s["file"], now) and s["file"] not in planned]
         if self.round:
-            self.round["total"] = len({s["file"] for s in q})
-            base = [s for s in base if s["file"] not in in_round]  # each once per round: a hard rule
+            # only the Hits snapshot: a song that was playing when the source was switched is not part of it
+            members = set((read_state("source") or {}).get("source", {}).get("files") or [s["file"] for s in q])
+            self.round["total"] = len(members)
+            base = [s for s in base if s["file"] not in in_round and s["file"] in members]  # each once per round
             if not base and not self.plan:
-                if not any(s["file"] not in in_round for s in q if s.get("id") != current):
+                if not any(s["file"] not in in_round and s["file"] in members for s in q if s.get("id") != current):
                     self.round["done"] = True
                     self.reason = f"round done: all {self.round['total']} heard (shuffle newround starts another)"
                     return
@@ -258,18 +262,26 @@ class Shuffle(Module):
             self.reason = "nothing to pick (all resting or requested)"
             return
         self.reason = ""
-        head = self.plan[0]
-        e = next((s for s in q if int(s["id"]) == head["id"]), None)
-        if e is not None and int(e.get("prio", 0)) != NOMINEE_PRIO:
-            await d.mpd.prioid(NOMINEE_PRIO, head["id"])
+        await self.publish(d, q)
+
+    async def publish(self, d, q):
+        """Give the plan its priorities (PLAN_N - k) and take ours back from songs no longer in it; only changed
+        values are written, so a re-plan costs a few commands, not ten."""
+        want = {e["id"]: PLAN_N - k for k, e in enumerate(self.plan)}
+        waiting = self.upnext_ids(d)
+        for s in q:
+            sid, prio = int(s["id"]), int(s.get("prio", 0))
+            target = want.get(sid, 0 if prio in OWN_PRIOS and sid not in waiting else prio)
+            if target != prio:
+                await d.mpd.prioid(target, sid)
 
     async def withdraw(self, d):
-        """Give up the plan: the head's priority is taken back and the lanes return."""
+        """Give up the plan: its priorities are taken back and the lanes return."""
         if self.plan:
-            head = self.plan[0]
-            e = await queue_entry(d.mpd, head["id"])
-            if e and e.get("file") == head["file"] and int(e.get("prio", 0)) == NOMINEE_PRIO:
-                await d.mpd.prioid(0, head["id"])
+            for e in self.plan:
+                found = await queue_entry(d.mpd, e["id"])
+                if found and found.get("file") == e["file"] and int(found.get("prio", 0)) in OWN_PRIOS:
+                    await d.mpd.prioid(0, e["id"])
             self.give_back(self.plan)
             self.plan = []
 

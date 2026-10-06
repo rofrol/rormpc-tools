@@ -95,7 +95,7 @@ def test_familiar_lane_prefers_plays_likes_and_overdue_songs():
             "d": heard(5, days_ago=20, cadence=10, liked=True), "e": {}}
     d, mpd, sh = setup(data=data)
     # b: sqrt(31) * clamp(0.1) -> 5.6*0.2; c: sqrt(6)*2 = 4.9; d liked: x3 = 14.7
-    assert sh.nominee["file"] == "d" and sh.nominee["lane"] == "familiar" and mpd.prio("d") == 1
+    assert sh.nominee["file"] == "d" and sh.nominee["lane"] == "familiar" and mpd.prio("d") == shuffle.PLAN_N
     assert "familiar: played 20 d ago, usually every 10 d, 5x, liked" in sh.nominee["why"]
 
 
@@ -150,7 +150,7 @@ def test_up_next_requests_are_not_nominated_and_stay_above():
     d, mpd, sh = setup(data={"c": heard(50)})
     send(d, mpd, "shuffle reroll", "upnext add c")
     assert mpd.prio("c") == 255
-    assert sh.nominee and sh.nominee["file"] != "c" and mpd.prio(sh.nominee["file"]) == 1
+    assert sh.nominee and sh.nominee["file"] != "c" and mpd.prio(sh.nominee["file"]) == shuffle.PLAN_N
 
 
 def test_heard_enough_cools_down_growing_and_skips_the_playing_song():
@@ -183,7 +183,7 @@ def test_hits_round_plays_each_song_once_then_stops():
 
 def test_it_owns_random_and_never_moves_songs():
     d, mpd, sh = setup(data={"e": heard(3)}, random=False)  # enabled with random off: it turns random on
-    assert mpd.rand is True and sh.active and mpd.prio("e") == 1
+    assert mpd.rand is True and sh.active and mpd.prio("e") == shuffle.PLAN_N
     assert mpd.files() == ["a", "b", "c", "d", "e", "f"]  # the queue's order is untouched
 
 
@@ -236,7 +236,8 @@ FILES12 = tuple("abcdefghijklmnopqrst")  # 20: enough left after rests, requests
 def test_plan_draws_ahead_in_play_order_and_only_the_head_has_priority():
     d, mpd, sh = setup(files=FILES12, data={f: heard(3) for f in FILES12})
     assert len(sh.plan) == shuffle.PLAN_N
-    assert mpd.prio(sh.plan[0]["file"]) == 1 and all(mpd.prio(e["file"]) == 0 for e in sh.plan[1:])
+    # the whole plan is published: plan[k] has priority PLAN_N - k, so MPD plays it in order
+    assert [mpd.prio(e["file"]) for e in sh.plan] == list(range(shuffle.PLAN_N, 0, -1))
     assert "a" not in [e["file"] for e in sh.plan]  # not the playing song
     assert len({e["file"] for e in sh.plan}) == shuffle.PLAN_N  # no repeats
     assert player.read_state("shuffle")["plan"][0]["why"]
@@ -247,7 +248,7 @@ def test_head_plays_then_the_plan_moves_up_and_is_topped_up(state):
     first, second = sh.plan[0]["file"], sh.plan[1]["file"]
     lanes_before = len(sh.cycle) + len(sh.plan)
     play(d, mpd, first)
-    assert sh.plan[0]["file"] == second and mpd.prio(second) == 1 and len(sh.plan) == shuffle.PLAN_N
+    assert sh.plan[0]["file"] == second and mpd.prio(second) == shuffle.PLAN_N and len(sh.plan) == shuffle.PLAN_N
     assert json.loads((state / "auto.jsonl").read_text().splitlines()[-1])["file"] == first
     assert (len(sh.cycle) + len(sh.plan)) % len(shuffle.LANES) == (lanes_before - 1) % len(shuffle.LANES)
 
@@ -267,5 +268,13 @@ def test_heard_enough_on_the_head_plans_again_without_it():
     d, mpd, sh = setup(files=FILES12, data={f: heard(3) for f in FILES12})
     head = sh.plan[0]["file"]
     send(d, mpd, f"shuffle heardenough {head}")
-    assert head not in [e["file"] for e in sh.plan] and mpd.prio(head) == 0 and mpd.prio(sh.plan[0]["file"]) == 1
+    assert head not in [e["file"] for e in sh.plan] and mpd.prio(head) == 0 and mpd.prio(sh.plan[0]["file"]) == shuffle.PLAN_N
 
+
+
+def test_a_round_takes_only_the_snapshot_not_the_song_playing_at_the_switch():
+    d, mpd, sh = setup(files=("x", "b", "c"), data={"c": heard(3)},
+                       source={"kind": "hits", "name": "80s", "len": 2, "files": ["b", "c"]})
+    mpd.cur = "1"  # x was playing when the source switched
+    asyncio.run(d.step({"player"}))
+    assert "x" not in [e["file"] for e in sh.plan] and sh.round["total"] == 2
