@@ -47,6 +47,17 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
 
 ## Invariants
 
+- Queue plan edits are daemon-owned priorities, never MPD queue moves. `shuffle swap VERSION ID_A ID_B TOKEN`
+  refreshes actual MPD state, checks the session/revision and adjacent live forecast IDs, then publishes priorities
+  and reconciles again (MPD can advance during the writes) before an acknowledgement in `shuffle.json` (`ack: {token, ok, error, version}` on success). Heartbeats do not
+  change `plan_version`; membership, order or source do. Rejected versions are not automatically retried.
+  A temporary patch retains the original order of survivors until the next draw (including per-song top-up),
+  a planned entry playing/leaving, reroll/new round/source change, or daemon restart. `patch_base` allows a
+  restart to restore the canonical order; it never resumes an old patch. Partial priority failure publishes
+  `publish_error`, restores in-memory order, and the ordinary next status reconciliation publishes recovery
+  immediately when priorities again match. `updated_at` is refreshed at the existing `MAX_WAIT` (30 s) wake;
+  UI freshness lasts two heartbeats (60 s), and requires the live daemon channel as well.
+
 - An Up next request becomes playing only after MPD accepts `playid`. A rejected start keeps the waiting
   request and previous playback intact and publishes `upnext.json` with an `error` for rormpc's Up next pane.
   Newly added Play now songs are registered as waiting before the start, including their random-on priority;
