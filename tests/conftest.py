@@ -6,7 +6,7 @@ _root = pathlib.Path(tempfile.mkdtemp(prefix="rormpc-tools-test-"))
 os.environ.update({
     "RORMPC_TOOLS_CONFIG": str(_root / "absent.toml"),
     "XDG_CONFIG_HOME": str(_root / "config"), "XDG_DATA_HOME": str(_root / "data"),
-    "XDG_CACHE_HOME": str(_root / "cache"), "MUSICDB": str(_root / "plays.db"),
+    "XDG_CACHE_HOME": str(_root / "cache"), "XDG_STATE_HOME": str(_root / "state"), "MUSICDB": str(_root / "plays.db"),
     "MUSICDB_DATA": str(_root / "music-data"), "YTMB_MUSIC_DIR": str(_root / "music"),
     "MPD_PORT": "1",  # a forgotten monkeypatch fails to connect instead of reaching the real MPD
     "LB_CUTOFF": "2026-01-01T00:00:00",

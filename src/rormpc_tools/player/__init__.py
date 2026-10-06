@@ -11,10 +11,13 @@ this daemon (temp file + rename), read by rormpc to show it.
 
 - gap: N seconds of silence between songs (`gap set N`, 0 = off; remembered across restarts).
 - upnext: songs asked for with "Play next" play before the rest of the queue (`upnext add FILE`, ...).
+- shuffle: with random on, the next song is drawn by weight (plays, likes) and nominated below Up next
+  (`shuffle on|off`, `shuffle heardenough FILE`, ...).
 """
 import argparse, asyncio, json, os, pathlib, sys, time
 
 from mpd.asyncio import MPDClient
+from mpd.base import CommandError
 
 CHANNEL = "rormpc"
 SUBSYSTEMS = ["player", "options", "mixer", "playlist", "message"]
@@ -45,6 +48,16 @@ def write_state(name, data):
 
 def log(msg):
     print(msg, file=sys.stderr, flush=True)
+
+
+async def queue_entry(mpd, id_):
+    """The queue entry with song id `id_` ({"id", "file", "prio"?...}), or None when it is gone (MPD answers
+    "No such song" with an error)."""
+    try:
+        found = await mpd.playlistid(id_)
+    except Exception:
+        return None
+    return found[0] if found else None
 
 
 class Module:
@@ -101,15 +114,23 @@ class Daemon:
                     await self.dispatch(m.get("message", ""))
         self.status = await self.mpd.status()
         for m in self.modules.values():
-            await m.on_status(self, self.status, changed)
+            await self.guarded(m, m.on_status(self, self.status, changed))
         fired = False
         now = time.time()
         for m in self.modules.values():
             due = m.deadline()
             if due is not None and due <= now:
-                await m.on_timer(self)
+                await self.guarded(m, m.on_timer(self))
                 fired = True
         return fired
+
+    async def guarded(self, module, coro):
+        """An MPD error in one module (a song that vanished meanwhile, ...) is logged; the others go on. A lost
+        connection still ends the daemon, and launchd restarts it."""
+        try:
+            await coro
+        except CommandError as e:
+            log(f"{module.name}: {e}")
 
     def wait_time(self):
         dues = [d for m in self.modules.values() if (d := m.deadline()) is not None]
@@ -140,14 +161,14 @@ class Daemon:
 
 
 async def _main():
-    from . import gap, upnext
+    from . import gap, shuffle, upnext
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seconds", type=float, default=3,
                     help="silence between songs until one is chosen with `gap set N` (then that is remembered)")
     a = ap.parse_args()
     c = MPDClient()
     await c.connect(os.environ.get("MPD_HOST", "localhost"), int(os.environ.get("MPD_PORT", 6600)))
-    await Daemon(c, [gap.Gap(a.seconds), upnext.UpNext()]).run()
+    await Daemon(c, [gap.Gap(a.seconds), upnext.UpNext(), shuffle.Shuffle()]).run()
 
 
 def main():

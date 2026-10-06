@@ -102,3 +102,19 @@ def test_bad_commands_are_ignored():
     mpd.messages = ["gap set 999", "nosuch thing", "gap", "gap frob 1"]
     run(d.step({"message"}))
     assert g.seconds == 3
+
+
+def test_an_mpd_error_in_one_module_does_not_stop_the_others():
+    from mpd.base import CommandError
+
+    class Broken(player.Module):
+        name = "broken"
+
+        async def on_status(self, d, s, changed):
+            raise CommandError("[50@0] {playlistid} No such song")
+
+    mpd = FakeMPD(PLAY)
+    g = gap.Gap(3)
+    d = player.Daemon(mpd, [Broken(), g])
+    run(d.step(set()))
+    assert g.armed_for == "1"

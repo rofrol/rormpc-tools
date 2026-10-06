@@ -32,7 +32,10 @@ class QueueMPD:
         return [{"id": s["id"], "file": s["file"]} for s in self.q]
 
     async def playlistid(self, id_):
-        return [{"id": s["id"], "file": s["file"]} for s in self.q if s["id"] == str(id_)]
+        found = [{"id": s["id"], "file": s["file"]} for s in self.q if s["id"] == str(id_)]
+        if not found:
+            raise RuntimeError("[50@0] {playlistid} No such song")  # what MPD answers
+        return found
 
     async def addid(self, file, pos=None):
         s = {"id": str(self.next_id), "file": file, "prio": 0}

@@ -533,9 +533,11 @@ def event_file(lib, files, src, ytid, mbid, artist, title, extra, uri=None):
     return match(lib, None, None, artist, title)[0]
 
 
-def counted(c, lib):
-    """{file: (count, last_ts)}, {file: favorite}, unmatched play keys, unmatched favorites."""
+def counted(c, lib, decayed=None):
+    """{file: (count, last_ts)}, {file: favorite}, unmatched play keys, unmatched favorites. With `decayed` (a
+    dict), it also gets each file's plays weighted by age: a play counts 1/2 after WEIGHT_HALF_LIFE days."""
     plays, last, unmatched = collections.Counter(), {}, collections.Counter()
+    now = dt.datetime.now()
     files = library_files(lib)
     prepare(lib, files)
     local = {ts for (ts,) in c.execute("SELECT ts FROM events WHERE source = 'local'")}
@@ -549,6 +551,12 @@ def counted(c, lib):
         if f:
             plays[f] += 1
             last[f] = max(last.get(f, ""), ts)
+            if decayed is not None:
+                try:
+                    age = max(0.0, (now - dt.datetime.fromisoformat(ts[:19])).total_seconds() / 86400)
+                except ValueError:
+                    age = 0.0
+                decayed[f] = decayed.get(f, 0.0) + 0.5 ** (age / WEIGHT_HALF_LIFE)
         else:
             unmatched[(artist or "", title or "", ytid or "")] += 1
     favs, fav_missing = set(), []
@@ -563,10 +571,34 @@ def counted(c, lib):
 
 LIKE_TO_LB = {"2": 1, "1": 0, "0": -1}  # rmpc like sticker -> LB feedback score (love / clear / hate)
 
+# weighted shuffle (mpd-player): a play's weight halves every this many days
+WEIGHT_HALF_LIFE = 60
+
+
+def shuffle_weight(decayed_plays, like):
+    """How much more often mpd-player's weighted shuffle picks a song: 1 (never played) to 3, by recent plays
+    (log-compressed, so the most played songs don't take all the airtime) and a like; a dislike makes it rare."""
+    import math
+    if like == "0":
+        return 0.25
+    return round(min(3.0, max(1.0, 1 + 0.3 * math.log1p(decayed_plays) + (1 if like == "2" else 0))), 3)
+
+
+def write_weights(weights):
+    """$XDG_STATE_HOME/rormpc/weights.json for mpd-player (musicdb is its only writer), atomically."""
+    d = pathlib.Path(os.environ.get("XDG_STATE_HOME") or settings.HOME / ".local/state") / "rormpc"
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / ".weights.json.tmp"
+    tmp.write_text(json.dumps({"generated": dt.datetime.now().isoformat(timespec="seconds"), "files": weights}))
+    os.replace(tmp, d / "weights.json")
+
+
 
 def sync(_a):
     c, lib, m = db(), library(), mpd()
-    plays, last, favs, _, _ = counted(c, lib)
+    decayed = {}
+    plays, last, favs, _, _ = counted(c, lib, decayed)
+    weights = {}
     files = library_files(lib)
     skips = skipped(c, last)
     durations = {s["file"]: float(one(s.get("duration", 0)) or 0) for s in m.listallinfo() if s.get("file")}
@@ -590,6 +622,7 @@ def sync(_a):
             n += 1
         if like in LIKE_TO_LB and f in mbid_of:
             likes[mbid_of[f]].append(LIKE_TO_LB[like])
+        weights[f] = {"w": shuffle_weight(decayed.get(f, 0.0), like), "p": round(decayed.get(f, 0.0), 2)}
         if f in unfinished and like != "2" and f not in keep:
             want["notFinished"] = unfinished[f]
             candidates.append(f)
@@ -602,6 +635,7 @@ def sync(_a):
                 m.sticker_delete("song", f, key)
             n += 1
     write_likes(m, files)
+    write_weights(weights)
     skipped_n = write_skipped_playlist(collections.Counter({f: k for f, k in skips.items() if f in files}))
     write_playlist("Not finished", candidates)
     print(f"{len(files)} songs, {sum(1 for f in files if plays.get(f))} with plays, "

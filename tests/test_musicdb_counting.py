@@ -1,5 +1,5 @@
 """Play counting: every play counted once, on the right file, and the history survives a cache rebuild."""
-import json, os, time, zoneinfo
+import json, os, pathlib, time, zoneinfo
 
 import pytest
 
@@ -154,6 +154,8 @@ def test_sync_snapshots_likes_with_the_song_identity(env, monkeypatch):
     likes = [json.loads(l) for l in (musicdb.DATA / "likes.jsonl").read_text().splitlines()]
     assert likes == [{"key": f"yt:{YT}", "file": RICK, "ytid": YT, "mbid": "mb-rick", "artist": "Rick Astley",
                       "title": "Never Gonna Give You Up", "like": "2"}]
+    weights = json.loads((pathlib.Path(os.environ["XDG_STATE_HOME"]) / "rormpc/weights.json").read_text())["files"]
+    assert weights[RICK]["w"] == 2  # never played, liked
 
 
 @pytest.mark.parametrize("system_tz", ["Europe/Warsaw", "America/New_York"])

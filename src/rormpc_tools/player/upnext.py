@@ -17,7 +17,7 @@ Commands (channel "rormpc"; FILE is a path in the music directory, ID an MPD son
 upnext.json: {"entries": [{"id", "file", "added"}], "playing": {...} or null, "error": str or null}; entries are
 the waiting ones in play order, "playing" the entry that is playing now.
 """
-from . import Module, log, read_state, write_state
+from . import Module, log, queue_entry, read_state, write_state
 
 MAX_PRIO = 255
 
@@ -79,11 +79,8 @@ class UpNext(Module):
     async def finished(self, d, entry):
         """An entry stopped playing: one added only for Up next leaves the queue (if it is still that file)."""
         if entry and entry.get("added"):
-            try:
-                found = await d.mpd.playlistid(entry["id"])
-            except Exception:
-                found = []
-            if found and found[0].get("file") == entry["file"]:
+            e = await queue_entry(d.mpd, entry["id"])
+            if e and e.get("file") == entry["file"]:
                 await d.mpd.deleteid(entry["id"])
 
     async def on_status(self, d, s, changed):
@@ -203,11 +200,8 @@ class UpNext(Module):
             await self.finished(d, prev)
 
     async def drop(self, d, e):
-        try:
-            found = await d.mpd.playlistid(e["id"])
-        except Exception:
-            found = []
-        if not found or found[0].get("file") != e["file"]:
+        found = await queue_entry(d.mpd, e["id"])
+        if not found or found.get("file") != e["file"]:
             return
         if e["added"]:
             await d.mpd.deleteid(e["id"])
