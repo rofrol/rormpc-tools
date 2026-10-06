@@ -1,5 +1,7 @@
-"""Weighted shuffle: with MPD's random on, the next song is drawn here instead of uniformly, and nominated with MPD
-priority 1, below the Up next requests (2-255), so a request always plays first.
+"""Weighted shuffle, a mode of its own next to MPD's random: the next song is drawn here by weight. With random on
+it is nominated with MPD priority 1, below the Up next requests (2-255); with random off it is moved right after
+the current song and the Up next requests (so the queue's order changes as it plays). Either way a request always
+plays first.
 
 The weight comes from `musicdb sync` (weights.json, hourly): 1 for a song never played, up to 3 for songs played a
 lot lately (log-compressed, a play counts half after 60 days) or liked; a dislike makes it rare. One pick in five
@@ -69,7 +71,13 @@ class Shuffle(Module):
         c = self.cooldown.get(file)
         return bool(c) and c["until"] > now
 
+    def upnext_ids(self, d):
+        """Queue ids waiting in Up next (the upnext module's list)."""
+        u = d.modules.get("upnext")
+        return {int(e["id"]) for e in getattr(u, "entries", [])}
+
     async def withdraw(self, d):
+        """Take back the pick: its priority (random on); a song moved forward (random off) just stays there."""
         if self.nominee:
             e = await queue_entry(d.mpd, self.nominee["id"])
             if e and e.get("file") == self.nominee["file"] and int(e.get("prio", 0)) == NOMINEE_PRIO:
@@ -84,8 +92,9 @@ class Shuffle(Module):
         self.ensure_round()
         heard = set(self.round["heard"]) if self.round else set()
         recent = set(self.recent[-min(RECENT_MAX, max(1, len(q) // 3)):])
+        waiting = self.upnext_ids(d)
         base = [s for s in q if s.get("id") != current and int(s.get("prio", 0)) == 0
-                and not self.cooled(s["file"], now)]
+                and int(s["id"]) not in waiting and not self.cooled(s["file"], now)]
         if self.round:
             pool = [s for s in base if s["file"] not in heard]
             self.round["total"] = len({s["file"] for s in q})
@@ -105,15 +114,17 @@ class Shuffle(Module):
             ws = [w.get(s["file"], 1.0) for s in pool]
             pick = self.rng.choices(pool, weights=ws)[0]
             why = f"weighted (w {w.get(pick['file'], 1.0):g})"
-        await d.mpd.prioid(NOMINEE_PRIO, pick["id"])
-        self.nominee = {"id": int(pick["id"]), "file": pick["file"], "why": why}
+        random_on = d.status.get("random") == "1"
+        if random_on:
+            await d.mpd.prioid(NOMINEE_PRIO, pick["id"])
+        elif d.status.get("song") is not None:
+            await d.mpd.moveid(pick["id"], f"+{len(waiting)}")  # after the current song and the requests
+        self.nominee = {"id": int(pick["id"]), "file": pick["file"], "why": why, "random": random_on}
         self.reason = ""
 
     def is_active(self, s):
         if not self.enabled:
             return False, "off"
-        if s.get("random") != "1":
-            return False, "random is off"
         if s.get("consume", "0") != "0":
             return False, "consume is on"
         if s.get("single") == "1":
@@ -150,10 +161,16 @@ class Shuffle(Module):
                 self.nominee = None  # it is playing (MPD reset its priority)
                 dirty = True
         if self.nominee:
-            # gone from the queue, or asked for with Play next (Up next priority): no longer our pick
+            # gone from the queue, or asked for with Play next: no longer our pick; random switched: pick again the
+            # other way (priority vs. position)
             e = await queue_entry(d.mpd, self.nominee["id"])
-            if not e or e.get("file") != self.nominee["file"] or int(e.get("prio", 0)) != NOMINEE_PRIO:
+            random_on = s.get("random") == "1"
+            if (not e or e.get("file") != self.nominee["file"] or self.nominee["id"] in self.upnext_ids(d)
+                    or (random_on and int(e.get("prio", 0)) != NOMINEE_PRIO)):
                 self.nominee = None
+                dirty = True
+            elif self.nominee.get("random", True) != random_on:
+                await self.withdraw(d)
                 dirty = True
         active, why = self.is_active(s)
         if active != self.active or (not active and why != self.reason):

@@ -87,11 +87,26 @@ def test_up_next_requests_are_not_nominated_and_stay_above():
     assert sh.nominee and sh.nominee["file"] != "c" and mpd.prio(sh.nominee["file"]) == 1
 
 
-def test_random_off_withdraws_the_nominee():
-    d, mpd, sh = setup(weights={"c": 3})
+def test_random_off_moves_the_pick_right_after_the_current_song():
+    d, mpd, sh = setup(weights={"e": 3}, random=False)
+    assert sh.active and sh.nominee["file"] == "e"
+    assert mpd.files()[:2] == ["a", "e"] and mpd.prio("e") == 0  # plays next in queue order
+
+
+def test_random_off_pick_goes_after_up_next_requests():
+    d, mpd, sh = setup(weights={"e": 3}, random=False)
+    send(d, mpd, "upnext add c")
+    assert mpd.files()[:3] == ["a", "c", "e"]
+
+
+def test_switching_random_picks_again_the_other_way():
+    d, mpd, sh = setup(weights={"c": 3, "e": 2})
+    assert mpd.prio("c") == 1
     mpd.random = False
     asyncio.run(d.step({"options"}))
-    assert sh.nominee is None and mpd.prio("c") == 0 and sh.reason == "random is off"
+    assert mpd.prio("c") == 0  # its priority was taken back
+    asyncio.run(d.step({"options"}))
+    assert sh.nominee and mpd.files()[1] == sh.nominee["file"]
 
 
 def test_heard_enough_cools_down_growing_and_skips_the_playing_song():
