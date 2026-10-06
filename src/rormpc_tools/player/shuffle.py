@@ -21,15 +21,26 @@ The next PLAN_N songs are drawn ahead (the plan, in play order) and published as
 Up next requests, so MPD itself plays them in order; rormpc shows the plan in its ShuffleNext column and Shuffle view. A planned song leaves the plan when it plays, leaves the queue, is asked for with Play next, gets
 "heard enough" or is played by hand; its lane goes back for its replacement, and the plan is topped up at the end. When the source is a Hits result (rormpc's source.json kind
 "hits"), a round plays each song once (hard rule); when all were heard it stops and says so; `shuffle newround`.
+Previous (`shuffle prev [CMD_ID]`, the media key through this daemon) walks back through the songs that really
+played (the trail, by queue id) and this mode never sends MPD `previous`. Each press goes one song further back from
+the cursor; a trail entry no longer in the queue is passed over; at the start of the trail nothing happens; the song
+starts at 0:00. Songs reached with Previous are not added to the trail, and normal forward play continues the trail
+from the cursor (what came after it is dropped, as the real history now goes on from there). The song gone back to
+leaves the plan, the rest keeps its order and is topped up without the songs left with Previous. Leaving a song with
+Previous is neutral: no skip, no rest, no weight change; rormpc's history shows it as kind "back" (a song already
+played to FINISHED_SHARE keeps its finished outcome). Each move is logged in prev.jsonl before playid, then
+confirmed or failed once the transition is observed; `musicdb import-skips` drops the scrobbler's skip that matches.
 
 Commands: `shuffle on|off|release`, `shuffle reroll`, `shuffle heardenough FILE` (the playing song also skips to
-the next), `shuffle unheardenough FILE`, `shuffle newround`.
+the next), `shuffle unheardenough FILE`, `shuffle newround`, `shuffle prev [CMD_ID]`.
 Files: shuffle.json (state: enabled, plan [{id, file, lane, slot, why}], cycle (lanes not yet planned), new_today,
-rests, cooldown, recent, live outcomes, round, active, reason); auto.jsonl (one line per song this shuffle started: {start, file}), read by musicdb.
+rests, cooldown, recent, live outcomes, round, active, reason, trail [{id, file}], cursor); auto.jsonl (one line per
+song this shuffle started: {start, file}), read by musicdb; prev.jsonl (each Previous move: {cmd, t, from, from_id,
+to, to_id}, then {cmd, result: confirmed|failed}), read by `musicdb import-skips`.
 """
 import datetime as dt, json, math, os, random, time, uuid
 
-from . import MAX_WAIT, Module, queue_entry, read_state, state_dir, write_state
+from . import MAX_WAIT, Module, log, queue_entry, read_state, state_dir, write_state
 
 LANES = ["familiar"] * 7 + ["rediscovery"] * 2 + ["new"]
 NEW_PER_DAY = 5
@@ -48,6 +59,23 @@ HISTORY_N = 20
 # the plan's MPD priorities: plan[k] gets PLAN_N - k (10..1), below the Up next requests (255, 254, ...), so MPD
 # itself plays the plan in order (also after "next" on a phone, and for 10 songs if this daemon stops)
 OWN_PRIOS = range(1, PLAN_N + 1)
+TRAIL_MAX = 200
+# a `shuffle prev` this soon after the last one is the media key's auto-repeat (macOS repeats every 30-80 ms after
+# the initial delay), not another press: a held key walks back at most four songs a second
+PREV_DEBOUNCE_S = 0.25
+
+
+def log_prev(record):
+    """One line appended to prev.jsonl with a single write and fsync, so a reader never sees half a record and the
+    intent is on disk before the daemon acts on it."""
+    p = state_dir() / "prev.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, (json.dumps(record) + "\n").encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def today():
@@ -78,6 +106,10 @@ class Shuffle(Module):
         self.cycle = saved.get("cycle", [])
         self.new_today = saved.get("new_today", {"day": today(), "n": 0})
         self.round = saved.get("round")
+        self.trail = saved.get("trail", [])  # songs that really played, oldest first: [{id, file}]
+        self.cursor = saved.get("cursor")  # trail index of the song gone back to, None at the trail's end
+        self.pending_prev = None  # the Previous move being made, until its transition is observed
+        self.last_prev = 0.0
         self.current = None  # songid being timed
         self.playing = None  # {id, file, played, last, running, duration, origin}
         self.random_seen = None  # MPD's random at the last wake, to notice it being turned off
@@ -112,7 +144,8 @@ class Shuffle(Module):
             "rests": self.rests, "recent": self.recent, "live": self.live, "history": self.history, "cycle": self.cycle,
             "new_today": self.new_today, "round": self.round, "active": self.active, "reason": self.reason,
             "plan_version": self.plan_version, "pid": os.getpid(), "updated_at": self.updated_at, "ack": self.ack,
-            "patch_base": self.patch_base, "publish_error": self.publish_error})
+            "patch_base": self.patch_base, "publish_error": self.publish_error, "trail": self.trail,
+            "cursor": self.cursor})
 
     @property
     def nominee(self):
@@ -276,8 +309,10 @@ class Shuffle(Module):
         in_round = set(self.round["heard"]) if self.round else set()
         waiting = self.upnext_ids(d)
         planned = {e["file"] for e in self.plan}
+        left_back = self.left_back()
         base = [s for s in q if s.get("id") != current and int(s.get("prio", 0)) in (0, *OWN_PRIOS)
-                and int(s["id"]) not in waiting and not self.resting(s["file"], now) and s["file"] not in planned]
+                and int(s["id"]) not in waiting and not self.resting(s["file"], now) and s["file"] not in planned
+                and s["file"] not in left_back]
         if self.round:
             # only the Hits snapshot: a song that was playing when the source was switched is not part of it
             members = set((read_state("source") or {}).get("source", {}).get("files") or [s["file"] for s in q])
@@ -389,14 +424,45 @@ class Shuffle(Module):
         self.live.append({"t": round(now), "file": p["file"], "kind": kind})
         self.history = (self.history + [{"t": round(now), "id": p["id"], "file": p["file"], "kind": kind}])[-HISTORY_N:]
 
-    async def song_started(self, d, s, now):
+    def left_back(self):
+        """Files left with Previous during the current walk back: they are not put back into the plan."""
+        return {e["file"] for e in self.trail[self.cursor + 1:]} if self.cursor is not None else set()
+
+    def left_with_prev(self, p, now):
+        """The song was left with Previous: neutral (no skip, no rest, no weight change), unless it had already
+        played long enough to count as finished, an outcome it keeps."""
+        dur = p["duration"] or 0
+        if dur and p["played"] >= FINISHED_SHARE * dur:
+            return self.outcome(p, now)
+        self.history = (self.history + [{"t": round(now), "id": p["id"], "file": p["file"], "kind": "back"}])[-HISTORY_N:]
+
+    def follow_trail(self, id_, file, back):
+        """A song started: forward play continues the trail from the cursor; one reached with Previous is not added."""
+        if back:
+            self.cursor = back["k"]
+            return
+        here = self.cursor if self.cursor is not None else len(self.trail) - 1
+        if 0 <= here < len(self.trail) and self.trail[here]["id"] == id_:
+            return  # the same song seen again (a daemon restart)
+        if self.cursor is not None:
+            self.trail = self.trail[:self.cursor + 1]
+            self.cursor = None
+        self.trail = (self.trail + [{"id": id_, "file": file}])[-TRAIL_MAX:]
+
+    async def song_started(self, d, s, now, back=None):
         cur = await d.mpd.currentsong()
         file = cur.get("file")
         if not file:
             self.playing = None
             return
+        self.follow_trail(int(s["songid"]), file, back)
         origin = "other"
-        if self.plan and str(self.plan[0]["id"]) == s.get("songid"):
+        if back:
+            origin = "back"
+            gone = [e for e in self.plan if e["file"] == file]
+            self.plan = [e for e in self.plan if e["file"] != file]  # the rest keeps its order
+            self.give_back(gone)
+        elif self.plan and str(self.plan[0]["id"]) == s.get("songid"):
             origin = "auto"
             head = self.plan.pop(0)  # its lane is spent now that it plays
             if head.get("lane") == "new":
@@ -440,12 +506,20 @@ class Shuffle(Module):
         self.tick(s, now)
         song = s.get("songid")
         if song != self.current:
+            back = self.pending_prev
+            if not (back and song == str(back["to_id"]) and self.current == str(back["from_id"])):
+                back = None  # only the observed transition from -> to is the Previous move
+            if back:
+                back["confirmed"] = True
             if self.playing:
-                self.outcome(self.playing, now)
+                if back:
+                    self.left_with_prev(self.playing, now)
+                else:
+                    self.outcome(self.playing, now)
                 self.playing = None
             self.current = song
             if song is not None:
-                await self.song_started(d, s, now)
+                await self.song_started(d, s, now, back)
             dirty = True
         q = None
         if self.plan:
@@ -514,10 +588,49 @@ class Shuffle(Module):
             self.ack = {"token": token, "ok": False, "error": str(exc)}
         self.save()
 
+    async def go_back(self, d, args):
+        """Previous: one song further back in the trail (see the module docstring). True when it moved."""
+        now = time.time()
+        if now - self.last_prev < PREV_DEBOUNCE_S:
+            return False  # key repeat
+        self.last_prev = now
+        # Messages are dispatched before the normal status refresh: reconcile external changes first.
+        d.status = await d.mpd.status()
+        await self.on_status(d, d.status, {"player", "playlist", "options"})
+        if not self.active:
+            await d.mpd.previous()  # plain random or in order: MPD's own Previous is the right one
+            return False
+        in_queue = {int(s["id"]): s["file"] for s in await d.mpd.playlistinfo()}
+        cur = int(d.status["songid"]) if "songid" in d.status else None
+        here = self.cursor if self.cursor is not None else len(self.trail) - (
+            1 if self.trail and self.trail[-1]["id"] == cur else 0)
+        k = next((k for k in range(here - 1, -1, -1)
+                  if in_queue.get(self.trail[k]["id"]) == self.trail[k]["file"]), None)
+        if k is None:
+            log("shuffle prev: at the start of the history")
+            return False
+        to = self.trail[k]
+        cmd = args.strip() or uuid.uuid4().hex
+        self.pending_prev = {"cmd": cmd, "t": round(now, 3), "from": (self.playing or {}).get("file"),
+                             "from_id": cur, "to": to["file"], "to_id": to["id"], "k": k}
+        log_prev({x: self.pending_prev[x] for x in ("cmd", "t", "from", "from_id", "to", "to_id")})  # before acting
+        try:
+            await d.mpd.playid(to["id"])  # starts at 0:00
+            d.status = await d.mpd.status()
+            await self.on_status(d, d.status, {"player"})
+        finally:
+            confirmed = self.pending_prev.get("confirmed", False)
+            self.pending_prev = None
+            log_prev({"cmd": cmd, "result": "confirmed" if confirmed else "failed"})
+        return confirmed
+
     async def on_message(self, d, verb, args):
         if verb == "swap":
             return await self.swap_slots(d, args)
-        if verb == "on":
+        if verb == "prev":
+            if not await self.go_back(d, args):
+                return
+        elif verb == "on":
             self.enabled = True
             if d.status.get("random") != "1":
                 await d.mpd.random(1)  # priorities steer MPD only with random on

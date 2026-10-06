@@ -292,14 +292,33 @@ def import_local(_a):
     add_events(rows)
 
 
+PREV_MATCH_S = 2  # a skip this close to a logged Previous move of the same song is that move, not a skip
+
+
+def prev_moves():
+    """{file: [Unix times]} of songs mpd-player's shuffle left with Previous (its prev.jsonl): leaving a song that
+    way is neutral, so the scrobbler's skip of it is not one. A move whose transition failed is left out."""
+    p = pathlib.Path(os.environ.get("XDG_STATE_HOME") or settings.HOME / ".local/state") / "rormpc/prev.jsonl"
+    rows = jsonl(p)
+    failed = {r["cmd"] for r in rows if r.get("result") == "failed"}
+    out = collections.defaultdict(list)
+    for r in rows:
+        if "t" in r and r.get("from") and r["cmd"] not in failed:
+            out[r["from"]].append(float(r["t"]))
+    return out
+
+
 def import_skips(_a):
+    moves = prev_moves()
+    log = jsonl(SKIPS_LOG)
+    kept = [r for r in log if not any(abs(float(r["ts"]) - t) <= PREV_MATCH_S for t in moves.get(r["file"], []))]
     rows = [(local_ts(r["ts"]), r["file"], r.get("mbid") or "", r.get("position_s"),
-             r.get("duration_s"), r.get("run_s")) for r in jsonl(SKIPS_LOG)]
+             r.get("duration_s"), r.get("run_s")) for r in kept]
     c = db()
     before = c.total_changes
     c.executemany("INSERT OR IGNORE INTO skips VALUES (?,?,?,?,?,?)", rows)
     c.commit()
-    print(f"{c.total_changes - before} new skips ({len(rows)} read)")
+    print(f"{c.total_changes - before} new skips ({len(log)} read, {len(log) - len(kept)} were Previous)")
 
 
 def skipped(c, last):

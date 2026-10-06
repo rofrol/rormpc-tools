@@ -12,7 +12,8 @@ this daemon (temp file + rename), read by rormpc to show it.
 - gap: N seconds of silence between songs (`gap set N`, 0 = off; remembered across restarts).
 - upnext: songs asked for with "Play next" play before the rest of the queue (`upnext add FILE`, ...).
 - shuffle: with random on, the next song is drawn by weight (plays, likes) and nominated below Up next
-  (`shuffle on|off`, `shuffle heardenough FILE`, ...).
+  (`shuffle on|off`, `shuffle heardenough FILE`, ...); `shuffle prev` is Previous through the songs that really
+  played, without counting a skip (send it instead of `mpc prev`).
 - mute: volume 0 for a while, the volume from before comes back at the deadline (`mute start SECONDS`, ...).
 """
 import argparse, asyncio, json, os, pathlib, sys, time

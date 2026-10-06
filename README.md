@@ -64,6 +64,13 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   request and previous playback intact and publishes `upnext.json` with an `error` for rormpc's Up next pane.
   Newly added Play now songs are registered as waiting before the start, including their random-on priority;
   a failed start is never mistaken for a completed play at the next daemon wake. There is no automatic retry.
+- With the weighted shuffle on, Previous goes through mpd-player, never MPD's `previous` (whose change of song the
+  daemon and the scrobbler would count as a skip): a client sends `mpc sendmessage rormpc "shuffle prev"`
+  (optionally a command id after `prev`). The daemon walks back through the songs that really played, by queue id;
+  leaving a song that way is neutral (no skip, rest or weight change). Each move is appended to `prev.jsonl` in
+  the daemon's state dir before `playid` and confirmed or failed after the transition is observed;
+  `musicdb import-skips` drops a scrobbler skip of the same song within 2 s of a move that did not fail. With the
+  shuffle off, `shuffle prev` sends MPD's own `previous`.
 - The `plays` and `skips` stickers are space-padded on purpose: rmpc sorts sticker values as text. Do not "clean up"
   the padding.
 - `mbtag.http()` returns `None` on 404 and, by default, when retries run out; with `strict=True` it raises instead.
