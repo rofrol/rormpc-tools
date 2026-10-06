@@ -12,6 +12,8 @@ votes when any have that many), plus my corrections (`musicdb genre`). Unlike th
 cut, so a "funk, disco, soul" artist counts for disco too. Counts overlap (a song has several genres); "recording"
 vs "artist" says where the genre came from, and artist genres make pop look bigger than it is. Aliases (hip-hop,
 rap -> hip hop; rhythm and blues -> r&b) are merged here and in the Hits genre filter; edit them in the pins file.
+MusicBrainz has no soundtrack genre, only tags ("soundtrack", "film score", "score"), so those tags count as the
+genre "soundtrack" (TAG_GENRES).
 
 Pins and aliases: ~/.config/rormpc-tools/hits-genres.json (version 1). rormpc reads it; only this command writes it.
 """
@@ -21,8 +23,26 @@ from . import mbtag, settings
 
 PINS = settings.XDG_CONFIG / "rormpc-tools" / "hits-genres.json"
 DEFAULT_PINS = ["rock", "pop", "hip hop", "r&b", "soul", "dance", "electronic", "disco", "funk", "country", "metal",
-                "folk", "latin", "jazz", "blues", "punk", "reggae", "classical"]
-DEFAULT_ALIASES = {"hip-hop": "hip hop", "rap": "hip hop", "rhythm and blues": "r&b"}
+                "folk", "latin", "jazz", "blues", "punk", "reggae", "classical", "soundtrack"]
+DEFAULT_ALIASES = {"hip-hop": "hip hop", "rap": "hip hop", "rhythm and blues": "r&b", "film score": "soundtrack"}
+# MusicBrainz tags that name a genre MusicBrainz does not list as one (no genre_mbid); a "Cast Away" theme carries
+# only the tags "soundtrack" (artist, 3 votes) and "film score" (release group).
+TAG_GENRES = {"soundtrack": "soundtrack", "film score": "soundtrack", "film soundtrack": "soundtrack",
+              "original soundtrack": "soundtrack", "score": "soundtrack"}
+
+
+def with_tag_genres(genres, tags, artist=False):
+    """MusicBrainz genres plus the tags of TAG_GENRES as their genre (the most votes when several map to one), in
+    the shape of the input: dicts with "name" (MusicBrainz API) or "tag" (ListenBrainz metadata) and "count".
+    For an artist the tag must have at least the votes of the artist's best genre: a film composer's "soundtrack"
+    defines him, the Beatles' does not make "Hey Jude" a soundtrack."""
+    out = {(g.get("name") or g.get("tag")): g for g in genres}
+    floor = max((g.get("count", 0) for g in genres), default=0) if artist else 0
+    for t in tags:
+        g = TAG_GENRES.get((t.get("name") or t.get("tag") or "").lower())
+        if g and t.get("count", 0) >= floor and t.get("count", 0) > out.get(g, {}).get("count", 0):
+            out[g] = {"name": g, "count": t["count"]}
+    return list(out.values())
 
 
 def load_pins():
@@ -66,14 +86,15 @@ def index(files=None):
     for s in songs:
         rec_mbid = one(s.get("musicbrainz_trackid", "")) or None
         md = meta.get(rec_mbid) or {}
-        rec = voted([t for t in md.get("tag", {}).get("recording", []) if t.get("genre_mbid")])
+        rec_tags = md.get("tag", {}).get("recording", [])
+        rec = voted(with_tag_genres([t for t in rec_tags if t.get("genre_mbid")], rec_tags))
         if rec:
             gs, how = rec, "recording"
         else:
             artist_mbid = (one(s.get("musicbrainz_artistid", "")) or "").split("/")[0].strip()
             r = cached(f"a-{artist_mbid}", lambda: mbtag.http(
                 f"https://musicbrainz.org/ws/2/artist/{artist_mbid}?inc=genres+tags&fmt=json") or {}) if artist_mbid else {}
-            gs, how = voted(r.get("genres", [])), "artist"
+            gs, how = voted(with_tag_genres(r.get("genres", []), r.get("tags", []), artist=True)), "artist"
         gs = effective_genres([aliases.get(g, g) for g in gs], s["file"], rec_mbid, manual)
         out.append((s["file"], plays.get(s["file"], 0), list(dict.fromkeys(gs)), how if gs else "unknown"))
     return out

@@ -239,8 +239,9 @@ def top_tags(tags, n=3):
 def artist_genres(mbid):
     if not mbid:
         return []
+    from .genres import with_tag_genres
     r = cached(f"a-{mbid}", lambda: mbtag.http(f"https://musicbrainz.org/ws/2/artist/{mbid}?inc=genres+tags&fmt=json") or {})
-    return top_tags(r.get("genres", [])) or top_tags(r.get("tags", []))
+    return top_tags(with_tag_genres(r.get("genres", []), r.get("tags", []), artist=True)) or top_tags(r.get("tags", []))
 
 
 def genres(song):
@@ -613,6 +614,7 @@ def recs_rows(a, lib, plays):
     """Source "recs": recordings of artists similar to the ones I play most (ListenBrainz Radio), not owned and not
     hidden. Each row says which seeds led to it; more seeds pointing at a recording rank it higher, then the seeds
     take turns, each with its most listened recordings first. No year (LB has none for these); genre filter on recording tags, else artist tags."""
+    from .genres import with_tag_genres
     seeds = recs_seeds(lib, plays)
     found = {}
     for seed_mbid, seed_name, w in seeds:
@@ -638,8 +640,9 @@ def recs_rows(a, lib, plays):
         if key in hidden and not a.show_hidden:
             continue
         rec_tags = [t["tag"] for t in m.get("tag", {}).get("recording", []) if t.get("count", 0) >= 2]
-        art_tags = sorted(m.get("tag", {}).get("artist", []), key=lambda t: -t.get("count", 0))
-        tags = rec_tags or [t["tag"] for t in art_tags if t.get("genre_mbid")][:5]
+        art_tags = m.get("tag", {}).get("artist", [])
+        art_genres = sorted(with_tag_genres([t for t in art_tags if t.get("genre_mbid")], art_tags, artist=True), key=lambda t: -t.get("count", 0))
+        tags = rec_tags or [t.get("name") or t["tag"] for t in art_genres][:5]
         if a.genre and not ok(tags):
             continue
         rows.append({"artist": artist, "title": title, "file": None, "year": 0, "years": [], "mbid": mbid,
