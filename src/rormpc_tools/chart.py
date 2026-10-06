@@ -133,6 +133,7 @@ def compute_race(events, resolve=lambda e: None, auto=None):
     auto = auto or {}
     local = {e["ts"] for e in events if e["source"] == "local"}
     plays, names, left_out = collections.defaultdict(collections.Counter), collections.defaultdict(collections.Counter), 0
+    seen = set()  # every year with a play, the shuffle's included: its years stay on the axis, empty
     for e in events:
         if e["source"] == "lb" and e["ts"] in local:
             continue
@@ -142,6 +143,7 @@ def compute_race(events, resolve=lambda e: None, auto=None):
         if not (artist and title):
             continue
         key = name_key(artist, title)
+        seen.add(int(e["ts"][:4]))
         if key in auto:
             t = ts_epoch(e["ts"])
             if any(s - 120 <= t <= s + 1800 for s in auto[key]):
@@ -149,7 +151,7 @@ def compute_race(events, resolve=lambda e: None, auto=None):
                 continue
         plays[e["ts"][:4]][key] += 1
         names[key][f"{artist} - {title}"] += 1
-    years = [str(y) for y in range(int(min(plays)), int(max(plays)) + 1)] if plays else []
+    years = [str(y) for y in range(min(seen), max(seen) + 1)] if seen else []
     frames = []
     for y in years:
         c = plays.get(y, collections.Counter())
