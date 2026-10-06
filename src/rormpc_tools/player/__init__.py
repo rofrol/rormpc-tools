@@ -10,6 +10,7 @@ client-to-client messages: channel "rormpc", one command per message, `<module> 
 this daemon (temp file + rename), read by rormpc to show it.
 
 - gap: N seconds of silence between songs (`gap set N`, 0 = off; remembered across restarts).
+- upnext: songs asked for with "Play next" play before the rest of the queue (`upnext add FILE`, ...).
 """
 import argparse, asyncio, json, os, pathlib, sys, time
 
@@ -139,14 +140,14 @@ class Daemon:
 
 
 async def _main():
-    from . import gap
+    from . import gap, upnext
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seconds", type=float, default=3,
                     help="silence between songs until one is chosen with `gap set N` (then that is remembered)")
     a = ap.parse_args()
     c = MPDClient()
     await c.connect(os.environ.get("MPD_HOST", "localhost"), int(os.environ.get("MPD_PORT", 6600)))
-    await Daemon(c, [gap.Gap(a.seconds)]).run()
+    await Daemon(c, [gap.Gap(a.seconds), upnext.UpNext()]).run()
 
 
 def main():
