@@ -1565,7 +1565,7 @@ wheels = [
 
 [[package]]
 name = "rormpc-tools"
-version = "0.2.22"
+version = "0.2.23"
 source = { editable = "." }
 dependencies = [
     { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
