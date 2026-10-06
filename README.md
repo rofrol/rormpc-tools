@@ -49,7 +49,8 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
 
 - Queue plan edits are daemon-owned priorities, never MPD queue moves. `shuffle swap VERSION ID_A ID_B TOKEN`
   refreshes actual MPD state, checks the session/revision and adjacent live forecast IDs, then publishes priorities
-  and reconciles again (MPD can advance during the writes) before an acknowledgement in `shuffle.json` (`ack: {token, ok, error, version}` on success). Heartbeats do not
+  and reconciles again (MPD can advance during the writes) before an acknowledgement in `shuffle.json`
+  (`ack: {token, ok, error, version}` on success). Heartbeats do not
   change `plan_version`; membership, order or source do. Rejected versions are not automatically retried.
   A temporary patch retains the original order of survivors until the next draw (including per-song top-up),
   a planned entry playing/leaving, reroll/new round/source change, or daemon restart. `patch_base` allows a
