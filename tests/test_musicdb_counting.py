@@ -199,6 +199,7 @@ def test_update_backs_off_listenbrainz_and_keeps_the_local_steps(env, monkeypatc
     monkeypatch.setattr(musicdb, "lb_playlists", lambda a: calls.append("lb_playlists"))
     monkeypatch.setattr(musicdb, "push_feedback", lambda c, s: calls.append("push") or 0)
     monkeypatch.setattr(musicdb, "youtube_index_daily", lambda: None)
+    monkeypatch.setattr(musicdb, "hits_background", lambda: None)  # MusicBrainz: no network in tests
     monkeypatch.setattr(musicdb, "deletions", lambda a: None)
     from rormpc_tools import identity
     monkeypatch.setattr(identity, "sync", lambda *a, **k: {"new": [], "renamed": [], "gone": [], "tagged": [], "conflicts": []})

@@ -102,19 +102,82 @@ def cache_db():
         _cache_db.execute("CREATE TABLE IF NOT EXISTS mb (name TEXT PRIMARY KEY, json TEXT)")
         _cache_db.execute("CREATE TABLE IF NOT EXISTS lb_pop (mbid TEXT PRIMARY KEY, listens INTEGER, fetched REAL)")
         _cache_db.execute("CREATE TABLE IF NOT EXISTS health (service TEXT PRIMARY KEY, down_until REAL)")
+        _cache_db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        import_seed(_cache_db)
     return _cache_db
 
 
+SEED = pathlib.Path(__file__).with_name("data") / "hits-seed.jsonl.gz"
+
+
+def import_seed(db):
+    """Fill an empty or older cache from the seed shipped with the package (the chosen MusicBrainz match of every
+    chart entry, artist genres, ListenBrainz popularity), so a new install ranks every year at once instead of
+    spending ~17 min of MusicBrainz requests per decade. Once per seed file; it only adds what the cache lacks,
+    never overwrites (a local re-match or a newer fetch stays)."""
+    if not SEED.exists():
+        return
+    import gzip, hashlib
+    rev = hashlib.sha256(SEED.read_bytes()).hexdigest()[:16]
+    if (db.execute("SELECT value FROM meta WHERE key = 'seed'").fetchone() or [None])[0] == rev:
+        return
+    with gzip.open(SEED, "rt") as fh, db:
+        for line in fh:
+            r = json.loads(line)
+            if r["t"] == "mb":
+                db.execute("INSERT OR IGNORE INTO mb VALUES (?, ?)", (r["k"], json.dumps(r["v"], ensure_ascii=False)))
+            elif r["t"] == "lb":
+                db.execute("INSERT OR IGNORE INTO lb_pop VALUES (?, ?, ?)", (r["k"], r["v"], r["at"]))
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('seed', ?)", (rev,))
+
+
+def export_seed(out=SEED):
+    """`hits seed`: write the seed from this cache: the matches of the current MATCH_VERSION, artist genres and
+    ListenBrainz popularity; not the raw search results (they stay local, for re-matching)."""
+    import gzip
+    db = cache_db()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    with gzip.open(out.with_suffix(".tmp"), "wt", compresslevel=9) as fh:
+        for k, v in db.execute("SELECT name, json FROM mb WHERE name LIKE ? OR name LIKE 'a-%' ORDER BY name",
+                               (f"m{MATCH_VERSION}-%",)):
+            fh.write(json.dumps({"t": "mb", "k": k, "v": json.loads(v)}, ensure_ascii=False) + "\n")
+            n += 1
+        for k, v, at in db.execute("SELECT mbid, listens, fetched FROM lb_pop ORDER BY mbid"):
+            fh.write(json.dumps({"t": "lb", "k": k, "v": v, "at": at}) + "\n")
+            n += 1
+    out.with_suffix(".tmp").replace(out)
+    print(f"{out}: {n} records, {out.stat().st_size / 1e6:.2f} MB")
+
+
 def cached(name, fn):
-    """A MusicBrainz lookup, computed once. Entries from the old per-file cache move into SQLite when first read."""
+    """A MusicBrainz lookup, computed once. Raw search results ("s-...", ~200 KB each) are kept compressed: they
+    are only read again to re-match after a matching rule changes. Entries from the old per-file cache move into
+    SQLite when first read."""
+    import zlib
     db = cache_db()
     row = db.execute("SELECT json FROM mb WHERE name = ?", (name,)).fetchone()
     if row:
-        return json.loads(row[0])
+        v = row[0]
+        return json.loads(zlib.decompress(v) if isinstance(v, bytes) else v)
     f = CACHE / "mb" / (re.sub(r"[^\w.-]", "_", name)[:180] + ".json")
     r = json.loads(f.read_text()) if f.exists() else fn()
-    db.execute("INSERT OR REPLACE INTO mb VALUES (?, ?)", (name, json.dumps(r, ensure_ascii=False)))
+    text = json.dumps(r, ensure_ascii=False)
+    db.execute("INSERT OR REPLACE INTO mb VALUES (?, ?)",
+               (name, zlib.compress(text.encode(), 6) if name.startswith("s-") else text))
     return r
+
+
+def compact_cache():
+    """Compress the raw search results already stored as text and give the space back (`hits compact`)."""
+    import zlib
+    db = cache_db()
+    rows = db.execute("SELECT name, json FROM mb WHERE name LIKE 's-%' AND typeof(json) = 'text'").fetchall()
+    with db:
+        for k, v in rows:
+            db.execute("UPDATE mb SET json = ? WHERE name = ?", (zlib.compress(v.encode(), 6), k))
+    db.execute("VACUUM")
+    print(f"compressed {len(rows)} search results; {(CACHE / 'cache.sqlite3').stat().st_size / 1e6:.1f} MB")
 
 
 main_artist = mbtag.main_artist
@@ -193,6 +256,8 @@ def MANUAL_GENRES():
 
 
 LB_POP_TTL_D = 30  # popularity moves slowly; it only breaks ties in the chart ranking
+# recordings per request: 25 answer in ~0.3 s, 100 took 4.6 s (2026-10-06), longer than the 2.5 s timeout
+LB_POP_BATCH = 25
 LB_DOWN_MIN = 20  # after a failed request, ListenBrainz is not asked again for this long (no waiting on every Apply)
 
 
@@ -216,9 +281,9 @@ def lb_popularity(mbids):
     down = db.execute("SELECT down_until FROM health WHERE service = 'lb_pop'").fetchone()
     if missing and down and down[0] > now:
         return out
-    for i in range(0, len(missing), 100):
+    for i in range(0, len(missing), LB_POP_BATCH):
         r = mbtag.http("https://api.listenbrainz.org/1/popularity/recording", host_interval=0.5,
-                       data=json.dumps({"recording_mbids": missing[i:i + 100]}).encode(),
+                       data=json.dumps({"recording_mbids": missing[i:i + LB_POP_BATCH]}).encode(),
                        headers={"Content-Type": "application/json"}, attempts=1, timeout=2.5)
         if r is None:
             db.execute("INSERT OR REPLACE INTO health VALUES ('lb_pop', ?)", (now + LB_DOWN_MIN * 60,))
@@ -739,13 +804,36 @@ def print_rows(rows, plays, a):
 
 
 def prefetch(a):
+    """Fill the cache for chart years. With --budget N it stops after N songs that needed MusicBrainz (and
+    --max-seconds): the hourly `musicdb update` calls it so a new chart year or a cache gap fills in slowly in the
+    background, then refreshes a little of the stale ListenBrainz popularity."""
     lo, _, hi = a.years.partition("-")
     years = range(max(int(lo), FIRST_YEAR), int(hi or lo) + 1)
+    db, started, fetched = cache_db(), time.time(), 0
+    budget = getattr(a, "budget", None)
     for y in years:
         es = entries([y]).values()
         for s in es:
+            key = f"m{MATCH_VERSION}-{s['artist']}-{s['title']}-{y}"
+            if budget is not None and not db.execute("SELECT 1 FROM mb WHERE name = ?", (key,)).fetchone():
+                if fetched >= budget or time.time() - started > a.max_seconds:
+                    print(f"budget used: {fetched} songs looked up", flush=True)
+                    return
+                fetched += 1
             genres(s | mb_song(s["title"], s["artist"], y))
-        print(y, len(es), flush=True)
+        if budget is None:
+            print(y, len(es), flush=True)
+    if budget is not None:
+        # a little stale or missing popularity per run (200 recordings, 8 short requests)
+        stale = [m for (m,) in db.execute("SELECT mbid FROM lb_pop WHERE fetched < ? ORDER BY fetched LIMIT 200",
+                                          (time.time() - LB_POP_TTL_D * 86400,))]
+        missing = [json.loads(v).get("mbid") for (v,) in db.execute(
+            "SELECT json FROM mb WHERE name LIKE ? AND json NOT LIKE '{}'", (f"m{MATCH_VERSION}-%",))]
+        have = {m for (m,) in db.execute("SELECT mbid FROM lb_pop")}
+        todo = stale + [m for m in missing if m and m not in have][:200 - len(stale)]
+        if todo:
+            lb_popularity(todo)
+        print(f"{fetched} songs looked up, {len(todo)} popularity checked", flush=True)
 
 
 def main():
@@ -759,8 +847,14 @@ def main():
         return hide_cmd(sys.argv[1:])
     if len(sys.argv) > 1 and sys.argv[1] == "prefetch":
         ap = argparse.ArgumentParser(prog="hits prefetch")
-        ap.add_argument("cmd"); ap.add_argument("years", nargs="?", default=f"{FIRST_YEAR}-2025")
+        ap.add_argument("cmd"); ap.add_argument("years", nargs="?", default=f"{FIRST_YEAR}-{dt.date.today().year - 1}")
+        ap.add_argument("--budget", type=int, help="stop after this many songs that need MusicBrainz (background use)")
+        ap.add_argument("--max-seconds", type=float, default=60)
         return prefetch(ap.parse_args())
+    if len(sys.argv) > 1 and sys.argv[1] == "seed":
+        return export_seed()
+    if len(sys.argv) > 1 and sys.argv[1] == "compact":
+        return compact_cache()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("decade", nargs="?", help='e.g. 1980s, 80s, 2010s, or "all" for top N of every decade')
     ap.add_argument("--years", help="year ranges instead of a decade, e.g. 1985-1992 or 1970-1979,1990-1999 (one pooled ranking)")

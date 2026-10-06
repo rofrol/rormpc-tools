@@ -773,11 +773,19 @@ def update(a):
         network(lb_playlists, argparse.Namespace(user=None, n=0, download=False, all=False), lb=True)
         lb_backoff_record(not lb_failed)
     network(youtube_index_daily)
+    network(hits_background)
     export(a)
     from . import doctor
     print(doctor.write_summary())
     if failed:
         sys.exit("failed: " + "; ".join(failed))
+
+
+def hits_background():
+    """Hits' cache, a little per hourly run: chart songs not looked up yet (a new year-end chart, a gap), at most 30
+    MusicBrainz lookups in 60 s, and some stale ListenBrainz popularity. A new install already has the seed."""
+    from . import hits
+    hits.prefetch(argparse.Namespace(years=f"{hits.FIRST_YEAR}-{dt.date.today().year - 1}", budget=30, max_seconds=60))
 
 
 PERIODIC = {"daily-jams", "weekly-jams", "weekly-exploration"}
