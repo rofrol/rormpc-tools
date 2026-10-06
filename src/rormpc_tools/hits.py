@@ -61,6 +61,7 @@ def cells(row):
 
 def chart(year):
     """[(position, title, artist)] of the Billboard Year-End Hot 100 for a year (cached)."""
+    cache_db()  # imports the seed first: it brings the chart pages too
     CACHE.mkdir(parents=True, exist_ok=True)
     f = CACHE / f"chart-{year}.json"
     if f.exists():
@@ -128,6 +129,10 @@ def import_seed(db):
                 db.execute("INSERT OR IGNORE INTO mb VALUES (?, ?)", (r["k"], json.dumps(r["v"], ensure_ascii=False)))
             elif r["t"] == "lb":
                 db.execute("INSERT OR IGNORE INTO lb_pop VALUES (?, ?, ?)", (r["k"], r["v"], r["at"]))
+            elif r["t"] == "chart":
+                f = CACHE / f"chart-{r['k']}.json"
+                if not f.exists():
+                    f.write_text(json.dumps(r["v"], ensure_ascii=False))
         db.execute("INSERT OR REPLACE INTO meta VALUES ('seed', ?)", (rev,))
 
 
@@ -142,6 +147,9 @@ def export_seed(out=SEED):
         for k, v in db.execute("SELECT name, json FROM mb WHERE name LIKE ? OR name LIKE 'a-%' ORDER BY name",
                                (f"m{MATCH_VERSION}-%",)):
             fh.write(json.dumps({"t": "mb", "k": k, "v": json.loads(v)}, ensure_ascii=False) + "\n")
+            n += 1
+        for f in sorted(CACHE.glob("chart-*.json")):
+            fh.write(json.dumps({"t": "chart", "k": f.stem[6:], "v": json.loads(f.read_text())}, ensure_ascii=False) + "\n")
             n += 1
         for k, v, at in db.execute("SELECT mbid, listens, fetched FROM lb_pop ORDER BY mbid"):
             fh.write(json.dumps({"t": "lb", "k": k, "v": v, "at": at}) + "\n")

@@ -54,3 +54,8 @@ def test_raw_searches_round_trip_compressed(cache):
     raw = hits.cache_db().execute("SELECT json FROM mb WHERE name = 's-big'").fetchone()[0]
     assert isinstance(raw, bytes) and len(raw) < 1000
     assert hits.cached("s-big", lambda: None) == v
+
+
+def test_seed_brings_the_chart_pages(cache, tmp_path):
+    write_seed(cache, [{"t": "chart", "k": "1984", "v": [[1, "When Doves Cry", "Prince"]]}])
+    assert hits.chart(1984) == [[1, "When Doves Cry", "Prince"]]  # no Wikipedia request
