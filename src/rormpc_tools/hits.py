@@ -11,6 +11,7 @@
   hits all -n 10 -g "+rock -thrash metal" --playlist   # top 10 of every decade, one playlist ordered by decade
   hits all -n 10 --owned --playlist           # the 10 biggest hits you have from each decade
   hits --years 1985-1992 --top 11-20 -g "+rock +pop -country"   # ranks 11-20% of that cohort
+  hits 1980s --top 1-10 --artist "+Queen +Toto"   # their songs in the 1980s top 10% (ranks within the decade)
   hits 1980s --top 1-10 --json ~/.cache/rormpc/hits/current.json  # result file for rormpc's Hits pane
   hits prefetch 1959-2025                     # warm the caches (charts + MusicBrainz, ~1 request/s)
   hits --source likes [--sort rediscover]     # your liked songs instead of a chart
@@ -202,6 +203,58 @@ def genre_filter(spec):
     return ok
 
 
+# ---------------------------------------------------------------- artist filter
+
+# separators inside an artist credit: "A feat. B", "A & B", "A and B", "A x B", "A vs. B", "A/B"; not a comma
+# ("Earth, Wind & Fire"; the whole credit always matches too)
+CREDIT_SPLIT = re.compile(r"\s+(?:feat\.?|featuring|ft\.?|with|x|and|vs\.?)\s+|\s*[&/]\s*|\s*\((?:feat\.?|ft\.?)\s*",
+                          re.I)
+
+
+def fold(name):
+    """Lowercase, diacritics removed ("Tiësto" = "tiesto", "Łódź" = "lodz"), spaces collapsed."""
+    import unicodedata
+    name = name.lower().replace("ł", "l").replace("ø", "o").replace("ß", "ss")
+    name = "".join(c for c in unicodedata.normalize("NFKD", name) if not unicodedata.combining(c))
+    return " ".join(name.replace(")", " ").split())
+
+
+def credit_members(credit):
+    """Each artist named in a credit, as written: "Rihanna feat. Calvin Harris" -> ["Rihanna", "Calvin Harris"]."""
+    return [m.strip(" )") for m in CREDIT_SPLIT.split(credit or "") if m.strip(" )")]
+
+
+def artist_filter(spec):
+    """'+Queen -Madonna, Toto' -> predicate over an artist credit. Included artists are ORed, excluded ones win;
+    a name matches the whole credit or any artist in it, exactly after folding case and diacritics ("Tiesto"
+    matches "Tiësto"; "Queen" does not match "Queen Latifah")."""
+    inc, exc = set(), set()
+    # rormpc separates names with ";" (a name may hold a comma: "Earth, Wind & Fire"); by hand "," works too
+    toks = spec.split(";") if ";" in (spec or "") else re.findall(r"[-+]?[^,\s][^,]*?(?=\s+[-+]|,|$)", spec or "")
+    for tok in filter(None, (t.strip() for t in toks)):
+        tok = tok.strip()
+        (exc if tok.startswith("-") else inc).add(fold(tok.lstrip("-+").strip()))
+    def ok(credit):
+        names = {fold(credit)} | {fold(m) for m in credit_members(credit)}
+        if names & exc:
+            return False
+        return not inc or bool(names & inc)
+    return ok
+
+
+def count_artists(rows):
+    """{folded name: [display name, songs]} over the artists named in the rows' credits."""
+    out = {}
+    for s in rows:
+        names = credit_members(s["artist"])
+        # a duo ("Simon & Garfunkel") is an artist of its own too; a "feat." credit is not
+        if len(names) > 1 and not re.search(r"\b(?:feat|featuring|ft)\b|\bx\b|\bvs\b", s["artist"], re.I):
+            names.append(s["artist"])
+        for m in names:
+            out.setdefault(fold(m), [m, 0])[1] += 1
+    return out
+
+
 # ---------------------------------------------------------------- main
 
 DECADES = [f"{d}s" for d in range(1950, 2030, 10)]
@@ -285,6 +338,9 @@ def ranked(years, a, lib):
     hidden = hidden_set()
     for s in rows:
         s["hidden"] = hide_key(s["artist"], s["title"]) in hidden
+    # the artist picker lists the artists of the whole cohort (before the Top % cut)
+    for k, (name, n) in count_artists([s for s in rows if a.show_hidden or not s["hidden"]]).items():
+        a.cohort_artists.setdefault(k, [name, 0])[1] += n
     top = parse_top(a.top)
     if top:
         rows = [s for s in rows if in_top(s["rank"], len(rows), top)]
@@ -439,7 +495,9 @@ def show(a):
     else:
         groups = [(d, decade_years(d)) for d in (DECADES if a.decade == "all" else [a.decade or sys.exit("give a decade or --years")])]
     period = a.years or a.decade or "all years"
-    label = (f"Hits {period}" + (f" {a.genre}" if a.genre else "") + (f" top {a.top}%" if a.top else f" top{a.n}")
+    a.cohort_artists = {}
+    label = (f"Hits {period}" + (f" {a.genre}" if a.genre else "") + (f" {a.artist}" if a.artist else "")
+             + (f" top {a.top}%" if a.top else f" top{a.n}")
              + (" per decade" if a.decade == "all" and not a.years else "") + (" owned" if a.owned else "")
              + (" by listens" if a.rank == "listens" else ""))
     rows = []
@@ -453,6 +511,12 @@ def show(a):
     for d, years in groups:
         part = (likes_rows(years, a, lib, plays, last) if a.source == "likes" else recs_rows(a, lib, plays)
                 if a.source == "recs" else ranked(years, a, lib))
+        if a.source != "billboard":  # no cohort beyond the rows themselves
+            for k, (name, n) in count_artists(part).items():
+                a.cohort_artists.setdefault(k, [name, 0])[1] += n
+        if a.artist:  # after the Top % cut: "Queen's songs in the 1980s top 10%", ranks keep their meaning
+            ok = artist_filter(a.artist)
+            part = [s for s in part if ok(s["artist"])]
         if len(groups) > 1:
             print(f"\n## {d} (Billboard year-end {coverage(d)}): {sum(1 for s in part if s['file'])}/{len(part)} in library")
         print_rows(part, plays, a)
@@ -526,7 +590,10 @@ def hide_cmd(argv):
 def write_json(a, label, rows, plays):
     """Versioned result file for rormpc's Hits pane, written atomically (the pane may read it any time)."""
     out = {"version": 1, "generated_at": dt.datetime.now().isoformat(timespec="seconds"), "label": label,
-           "args": {"period": a.years or a.decade, "top": a.top, "genre": a.genre, "owned": a.owned, "rank": a.rank,
+           "artists": [{"name": name, "songs": n} for name, n in
+                       sorted(a.cohort_artists.values(), key=lambda x: (-x[1], fold(x[0])))],
+           "args": {"period": a.years or a.decade, "top": a.top, "genre": a.genre, "artist": a.artist,
+                    "owned": a.owned, "rank": a.rank,
                     "show_hidden": a.show_hidden, "source": a.source, "sort": a.sort},
            "rank_note": ("more of your most played artists point to it; then they take turns" if a.source == "recs"
                          else "rank by your plays among liked songs" if a.source == "likes" and a.sort == "plays"
@@ -590,6 +657,8 @@ def main():
     ap.add_argument("--sort", choices=["plays", "rediscover"], default="plays", help="order for --source likes")
     ap.add_argument("-n", type=int, default=100, help="how many (10/100/1000)")
     ap.add_argument("-g", "--genre", default="", help='e.g. "rock -country" or "hip hop, r&b"')
+    ap.add_argument("--artist", default="", help='e.g. "+Queen -Madonna" or "Toto, Queen": artists of the credit '
+                    '(feat., &, ...), case and diacritics ignored; applied after the Top %% cut')
     ap.add_argument("--rank", choices=["chart", "listens"], default="chart")
     ap.add_argument("--owned", action="store_true", help="top N among the songs you have, not the overall top N")
     ap.add_argument("--playlist", action="store_true", help="write an MPD playlist of the songs you have")
