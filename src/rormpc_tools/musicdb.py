@@ -602,6 +602,8 @@ def sync(_a):
           f"{sum(1 for v in likes.values() if max(v) == 1)} liked, {n} sticker updates, "
           f"{skipped_n} in playlist Skipped, {len(candidates)} in Not finished")
     # the network last: a ListenBrainz failure must not cost the local results; unsent likes go next time
+    if LB_PAUSED[0]:
+        return
     sent = push_feedback(c, {mbid: max(scores) for mbid, scores in likes.items()})  # duplicates: a like wins
     print(f"{sent} LB feedback sent")
 
@@ -639,23 +641,58 @@ def push_feedback(c, scores):
     return len(todo)
 
 
-def update(a):
-    """Every step runs even when ListenBrainz is down; failed network steps are reported at the end."""
-    failed = []
+LB_BACKOFF = settings.XDG_CACHE / "rormpc-tools" / "lb-backoff.json"
+LB_BACKOFF_MAX_S = 12 * 3600
+LB_PAUSED = [False]  # set by update() while ListenBrainz is in backoff: sync then keeps likes for later
 
-    def network(step, *args):
+
+def lb_backoff():
+    try:
+        return json.loads(LB_BACKOFF.read_text())
+    except (OSError, ValueError):
+        return {"failures": 0, "next": 0}
+
+
+def lb_backoff_record(ok):
+    """After a run that reached ListenBrainz: reset, or wait 1, 2, 4 ... 12 hours before trying again (the hourly
+    job would otherwise spend its retries and timeouts on a server that is down)."""
+    st = {"failures": 0, "next": 0} if ok else lb_backoff()
+    if not ok:
+        st["failures"] += 1
+        st["next"] = time.time() + min(3600 * 2 ** (st["failures"] - 1), LB_BACKOFF_MAX_S) - 60  # -60: the next tick
+    LB_BACKOFF.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LB_BACKOFF.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st))
+    tmp.replace(LB_BACKOFF)
+
+
+def update(a):
+    """Every step runs even when ListenBrainz is down; failed network steps are reported at the end. After a
+    ListenBrainz failure its steps pause with a growing backoff; the local steps run every time."""
+    failed, lb_failed = [], []
+
+    def network(step, *args, lb=False):
         try:
             step(*args)
         except (Exception, SystemExit) as e:  # ListenBrainz down, slow or a bad token: the local log still counts
             failed.append(f"{step.__name__}: {e}")
+            (lb_failed if lb else []).append(step.__name__)
             print(f"{step.__name__} failed: {e}", file=sys.stderr)
 
+    st = lb_backoff()
+    LB_PAUSED[0] = time.time() < st["next"]
+    if LB_PAUSED[0]:
+        print(f"ListenBrainz: paused after {st['failures']} failed runs, next try after "
+              f"{dt.datetime.fromtimestamp(st['next']).strftime('%H:%M')}")
     deletions(argparse.Namespace(retry=True, json=False))
     import_skips(a)
     import_local(a)
-    network(import_lb, a)
-    network(sync, a)  # its last step sends likes to ListenBrainz: a timeout there must not skip the export
-    network(lb_playlists, argparse.Namespace(user=None, n=0, download=False, all=False))
+    if not LB_PAUSED[0]:
+        network(import_lb, a, lb=True)
+    network(sync, a, lb=True)  # its last step sends likes to ListenBrainz: a timeout there must not skip the export
+    if not LB_PAUSED[0]:
+        network(lb_playlists, argparse.Namespace(user=None, n=0, download=False, all=False), lb=True)
+        lb_backoff_record(not lb_failed)
     network(youtube_index_daily)
     export(a)
     from . import doctor

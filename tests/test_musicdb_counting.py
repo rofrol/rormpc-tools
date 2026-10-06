@@ -183,3 +183,28 @@ def test_listenbrainz_failure_in_sync_keeps_the_local_results(env, monkeypatch):
         musicdb.sync(None)
     assert m.stickers[RICK]["playCount"] == "1"
     assert (musicdb.PLAYLISTS / "Not finished.m3u").exists() and (musicdb.PLAYLISTS / "Skipped.m3u").exists()
+
+
+def test_update_backs_off_listenbrainz_and_keeps_the_local_steps(env, monkeypatch, tmp_path):
+    env(SONGS)
+    from rormpc_tools import doctor
+    monkeypatch.setattr(musicdb, "LB_BACKOFF", tmp_path / "lb-backoff.json")
+    monkeypatch.setattr(doctor, "SUMMARY", tmp_path / "doctor.json")
+    calls = []
+    def lb_down(_a):
+        calls.append("import_lb"); raise TimeoutError("The read operation timed out")
+    monkeypatch.setattr(musicdb, "import_lb", lb_down)
+    monkeypatch.setattr(musicdb, "lb_playlists", lambda a: calls.append("lb_playlists"))
+    monkeypatch.setattr(musicdb, "push_feedback", lambda c, s: calls.append("push") or 0)
+    monkeypatch.setattr(musicdb, "youtube_index_daily", lambda: None)
+    monkeypatch.setattr(musicdb, "deletions", lambda a: None)
+    musicdb.LISTENS_LOG.write_text(json.dumps({"ts": 1790000000, "file": RICK, "mbid": "mb-rick"}) + "\n")
+    with pytest.raises(SystemExit):
+        musicdb.update(None)
+    assert calls == ["import_lb", "push", "lb_playlists"]
+    assert json.loads((tmp_path / "lb-backoff.json").read_text())["failures"] == 1
+    calls.clear()
+    musicdb.update(None)  # within the hour: ListenBrainz is skipped, local listens still count
+    assert calls == [] and counts() == {RICK: 1}
+    musicdb.lb_backoff_record(True)
+    assert json.loads((tmp_path / "lb-backoff.json").read_text()) == {"failures": 0, "next": 0}

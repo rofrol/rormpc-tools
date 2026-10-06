@@ -53,6 +53,7 @@ def env(tmp_path, monkeypatch):
                         "DONE": data / "deletions" / "done.jsonl", "PENDING": data / "deletions" / "pending.jsonl",
                         "LB_CUTOFF": "2026-01-01T00:00:00"}.items():
         monkeypatch.setattr(musicdb, name, value)
+    monkeypatch.setattr(musicdb, "LB_PAUSED", [False])
     holder = {}
 
     def install(songs=()):

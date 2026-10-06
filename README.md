@@ -82,6 +82,8 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   version I don't own". Decisions live in `versions.jsonl` (append-only) with the file's identity and the
   group's files at the time; a gone file or a changed group sends the decision back for review, never to a
   guessed file. Suggestions (markers, Spotify album, longest play vs file length) are shown, never applied.
+- `musicdb update` pauses its ListenBrainz steps after a failed run (1, 2, 4 ... 12 hours, state in
+  ~/.cache/rormpc-tools/lb-backoff.json); the local steps (scrobbler log, stickers, export, doctor) run every hour.
 - `musicdb doctor` lists silent data errors (duplicate listens, a song in several files, plays credited to no
   file, paths that no longer exist); run it after anything that changes history or moves files.
 - Personal data (play history, exports, OAuth secrets, account names) never goes into this repository: it is
