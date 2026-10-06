@@ -9,6 +9,9 @@ from test_upnext import QueueMPD
 
 
 class PlayingMPD(QueueMPD):
+    async def random(self, on):
+        self.rand = bool(int(on))
+
     async def playlistinfo(self):
         return [{"id": s["id"], "file": s["file"], **({"prio": str(s["prio"])} if s["prio"] else {})} for s in self.q]
 
@@ -102,7 +105,7 @@ def test_random_off_pick_goes_after_up_next_requests():
 def test_switching_random_picks_again_the_other_way():
     d, mpd, sh = setup(weights={"c": 3, "e": 2})
     assert mpd.prio("c") == 1
-    mpd.random = False
+    mpd.rand = False
     asyncio.run(d.step({"options"}))
     assert mpd.prio("c") == 0  # its priority was taken back
     asyncio.run(d.step({"options"}))
@@ -167,3 +170,14 @@ def test_replaced_queue_drops_the_gone_nominee_and_starts_a_round():
     asyncio.run(d.step({"playlist", "player"}))
     assert sh.nominee and sh.nominee["id"] != old and sh.nominee["file"] == "y"
     assert sh.round["source"] == "hits:80s" and sh.round["heard"] == ["x"]
+
+
+def test_turning_it_on_turns_random_off_and_random_on_turns_it_off():
+    d, mpd, sh = setup(weights={"c": 3})  # random on
+    send(d, mpd, "shuffle off")
+    send(d, mpd, "shuffle on")
+    assert mpd.rand is False and sh.enabled and sh.nominee
+    mpd.rand = True  # e.g. x in rormpc, or a phone
+    asyncio.run(d.step({"options"}))
+    assert not sh.enabled and sh.nominee is None
+    assert shuffle.Shuffle().enabled is False

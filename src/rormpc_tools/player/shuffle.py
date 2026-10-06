@@ -1,7 +1,8 @@
 """Weighted shuffle, a mode of its own next to MPD's random: the next song is drawn here by weight. With random on
 it is nominated with MPD priority 1, below the Up next requests (2-255); with random off it is moved right after
 the current song and the Up next requests (so the queue's order changes as it plays). Either way a request always
-plays first.
+plays first. It excludes MPD's random: turning it on turns random off, and random turned on (by any client, e.g.
+rormpc's x or a phone) turns it off.
 
 The weight comes from `musicdb sync` (weights.json, hourly): 1 for a song never played, up to 3 for songs played a
 lot lately (log-compressed, a play counts half after 60 days) or liked; a dislike makes it rare. One pick in five
@@ -41,6 +42,7 @@ class Shuffle(Module):
         self.recent = saved.get("recent", [])
         self.round = saved.get("round")
         self.current = None
+        self.random_seen = None  # MPD's random at the last wake, to notice it being turned on
         self.active = False
         self.reason = ""
         self.rng = rng or random.Random()
@@ -149,6 +151,13 @@ class Shuffle(Module):
     async def on_status(self, d, s, changed):
         dirty = False
         self.ensure_round()
+        random_on = s.get("random") == "1"
+        if random_on and self.random_seen is False and self.enabled:
+            # random was just turned on: the two modes exclude each other, the newer one wins
+            self.enabled = False
+            await self.withdraw(d)
+            dirty = True
+        self.random_seen = random_on
         song = s.get("songid")
         if song != self.current:
             self.current = song
@@ -191,6 +200,10 @@ class Shuffle(Module):
             self.enabled = verb == "on"
             if not self.enabled:
                 await self.withdraw(d)
+            elif d.status.get("random") == "1":
+                await self.withdraw(d)  # a priority pick means nothing once random is off
+                await d.mpd.random(0)
+                self.random_seen = False
         elif verb == "reroll":
             await self.withdraw(d)
         elif verb == "heardenough":

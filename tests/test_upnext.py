@@ -13,7 +13,7 @@ class QueueMPD:
         self.next_id = len(files) + 1
         self.cur = None
         self.state = "stop"
-        self.random = random
+        self.rand = random
         self.consume = consume
         self.messages = []
         self.calls = []
@@ -22,7 +22,7 @@ class QueueMPD:
         return next(i for i, s in enumerate(self.q) if s["id"] == str(id_))
 
     async def status(self):
-        s = {"state": self.state, "random": "1" if self.random else "0", "consume": "1" if self.consume else "0",
+        s = {"state": self.state, "random": "1" if self.rand else "0", "consume": "1" if self.consume else "0",
              "repeat": "0", "single": "0"}
         if self.cur is not None:
             s.update(songid=self.cur, song=str(self.pos(self.cur)))
