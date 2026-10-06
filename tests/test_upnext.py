@@ -32,7 +32,8 @@ class QueueMPD:
         return [{"id": s["id"], "file": s["file"], "pos": str(i)} for i, s in enumerate(self.q)]
 
     async def playlistid(self, id_):
-        found = [{"id": s["id"], "file": s["file"], "pos": str(i)} for i, s in enumerate(self.q) if s["id"] == str(id_)]
+        found = [{"id": s["id"], "file": s["file"], "pos": str(i), **({"prio": str(s["prio"])} if s["prio"] else {})}
+                 for i, s in enumerate(self.q) if s["id"] == str(id_)]  # MPD leaves out a priority of 0
         if not found:
             raise RuntimeError("[50@0] {playlistid} No such song")  # what MPD answers
         return found
@@ -177,3 +178,24 @@ def test_replaced_queue_keeps_requests_by_file():
     assert u.entries[0] == {"id": 50, "file": "c", "added": False}
     assert u.entries[1]["file"] == "x" and u.entries[1]["added"] and "x" in mpd.files()  # added again
     assert mpd.prio("c") == 255 and mpd.prio("x") == 254
+
+
+def test_entries_skipped_past_between_wakes_count_as_played():
+    d, mpd, u = setup()
+    send(d, mpd, "upnext add c", "upnext add x")
+    c, x = (e["id"] for e in u.entries)
+    # three quick `next`s: c and x each start (MPD resets their priority) and are skipped before the daemon wakes
+    for id_ in (c, x):
+        mpd.q[mpd.pos(id_)]["prio"] = 0
+    advance(d, mpd, "2")
+    assert u.entries == [] and u.playing is None
+    assert "x" not in mpd.files() and "c" in mpd.files()  # the added one leaves the queue, the source song stays
+    assert player.read_state("upnext")["entries"] == []
+
+
+def test_turning_random_on_keeps_the_waiting_entries():
+    d, mpd, u = setup(random=False)
+    send(d, mpd, "upnext add c")  # random off: moved after the current song, no priority
+    mpd.rand = True
+    asyncio.run(d.step({"options", "player"}))
+    assert [e["file"] for e in u.entries] == ["c"] and mpd.prio("c") == 255

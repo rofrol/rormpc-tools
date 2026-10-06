@@ -103,6 +103,8 @@ class UpNext(Module):
                 dirty = True
             self.current = song
         random = s.get("random") == "1"
+        if random and self.random and "player" in changed and await self.started_unseen(d, song):
+            dirty = True
         if random != self.random:
             self.random = random
             if self.entries:
@@ -113,6 +115,23 @@ class UpNext(Module):
             dirty = True
         if dirty:
             self.save()
+
+    async def started_unseen(self, d, song):
+        """Entries that started and were skipped past between two wakes (`mpc next` three times in a row): this never
+        saw them play, but MPD resets the priority of a song that starts, so with random on (since before this wake:
+        turning it on gives the priorities only now) a waiting entry back at 0 has played."""
+        gone = []
+        for e in self.entries:
+            if e["id"] == song:
+                continue
+            found = await queue_entry(d.mpd, e["id"])
+            if found and found.get("file") == e["file"] and int(found.get("prio", 0)) == 0:
+                gone.append(e)
+        for e in gone:
+            self.entries.remove(e)
+            await self.finished(d, e)
+            log(f"upnext: {e['file']} started and was skipped past")
+        return bool(gone)
 
     def find(self, id_):
         return next((e for e in self.entries if e["id"] == int(id_)), None)
