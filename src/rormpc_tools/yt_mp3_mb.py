@@ -75,6 +75,16 @@ def ask(row, d):
             return opts[int(c) - 1]
 
 
+def replaygain(path):
+    """Track ReplayGain tags (rsgain, -18 LUFS) so MPD's `replaygain "track"` evens out loudness. Optional: without
+    rsgain, MPD falls back to replaygain_missing_preamp."""
+    if not shutil.which("rsgain"):
+        return
+    p = subprocess.run(["rsgain", "custom", "-s", "i", "-l", "-18", "-q", str(path)], capture_output=True, text=True)
+    if p.returncode:  # loudness tags must not lose the download
+        print(f"  rsgain failed: {(p.stderr or p.stdout).strip()[-200:]}", file=sys.stderr)
+
+
 def process(path, info, target, yes):
     d = mbtag.collect(path, info["id"], info.get("channel") or info.get("uploader") or "", info.get("title") or "",
                       info.get("description"), float(info.get("duration") or 0), info.get("artist"), info.get("track"))
@@ -89,6 +99,7 @@ def process(path, info, target, yes):
             mbtag.embed_cover(path, cov, row["title"])
     except Exception as e:  # a missing cover must not lose the download
         print(f"  cover failed: {e}", file=sys.stderr)
+    replaygain(path)
     idx = info.get("playlist_index")
     name = (f"{int(idx):03d}--" if idx else "") + f"{safe(row['artist'], 60)}--{safe(row['title'])}--{info['id']}--{info.get('upload_date') or ''}.mp3"
     target.mkdir(parents=True, exist_ok=True)
