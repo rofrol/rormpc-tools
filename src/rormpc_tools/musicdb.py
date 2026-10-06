@@ -140,7 +140,7 @@ def export(_a):
             json.dumps({k: v for k, v in zip(cols, r) if v not in ("", None)}, ensure_ascii=False) + "\n" for r in rows))
     git = lambda *a: subprocess.run(["git", "-C", str(DATA), *a], capture_output=True, text=True)
     # the hand-written logs (tag lists, manual genres, hidden hits) are committed with the hourly export
-    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl", "likes.jsonl")
+    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl", "likes.jsonl", "aliases.jsonl")
             if (DATA / f).exists()]
     git("add", "events.jsonl", "favorites.jsonl", "tombstones.jsonl", "skips.jsonl", "deletions", *logs)
     if git("diff", "--cached", "--quiet").returncode:
