@@ -23,7 +23,7 @@ lane is spent only when its pick starts playing. When the source is a Hits resul
 Commands: `shuffle on|off|release`, `shuffle reroll`, `shuffle heardenough FILE` (the playing song also skips to
 the next), `shuffle unheardenough FILE`, `shuffle newround`.
 Files: shuffle.json (state: enabled, nominee {id, file, lane, why}, cycle, new_today, rests, cooldown, recent, live
-skips, round, active, reason); auto.jsonl (one line per song this shuffle started: {start, file}), read by musicdb.
+skips, round, active, reason, outlook: the draw after the pick with its top candidates and their chances); auto.jsonl (one line per song this shuffle started: {start, file}), read by musicdb.
 """
 import datetime as dt, json, math, random, time
 
@@ -41,6 +41,7 @@ COOLDOWN_DAYS = [1, 3, 7, 14]
 # asking "heard enough" again within this many days after the last cooldown ended grows it
 COOLDOWN_MEMORY_DAYS = 30
 FINISHED_SHARE = 0.8
+OUTLOOK_TOP = 30
 NOMINEE_PRIO = 1
 
 
@@ -62,6 +63,7 @@ class Shuffle(Module):
         self.cycle = saved.get("cycle", [])
         self.new_today = saved.get("new_today", {"day": today(), "n": 0})
         self.round = saved.get("round")
+        self.outlook = saved.get("outlook")  # the draw after the pick, for rormpc's Shuffle view
         self.current = None  # songid being timed
         self.playing = None  # {id, file, played, last, running, duration, origin}
         self.random_seen = None  # MPD's random at the last wake, to notice it being turned off
@@ -74,7 +76,7 @@ class Shuffle(Module):
         write_state("shuffle", {
             "enabled": self.enabled, "nominee": self.nominee, "cooldown": self.cooldown, "rests": self.rests,
             "recent": self.recent, "live": self.live, "cycle": self.cycle, "new_today": self.new_today,
-            "round": self.round, "active": self.active, "reason": self.reason})
+            "round": self.round, "active": self.active, "reason": self.reason, "outlook": self.outlook})
 
     # ------------------------------------------------------------ data
 
@@ -205,6 +207,16 @@ class Shuffle(Module):
             self.reason = "nothing to pick (all resting or requested)"
             return
         lane = self.next_lane()
+        used, pool, ws = self.draw_pool(lane, eligible, now)
+        pick = self.rng.choices(pool, weights=ws)[0]
+        await d.mpd.prioid(NOMINEE_PRIO, pick["id"])
+        why = self.explain(used, pick["file"], now) + ("" if used == lane else f" (lent by {lane})")
+        self.nominee = {"id": int(pick["id"]), "file": pick["file"], "lane": used, "slot": lane, "why": why}
+        self.reason = ""
+        self.plan_outlook(eligible, pick, now, len(q), len(base))
+
+    def draw_pool(self, lane, eligible, now):
+        """The pool a draw for `lane` samples (a lane with nothing eligible lends its turn) and its weights."""
         pools = self.pools(eligible, now)
         order = [lane] + [x for x in ("familiar", "rediscovery", "new") if x != lane]
         used, pool = next(((x, pools[x]) for x in order if pools[x]), ("any", eligible))
@@ -212,11 +224,23 @@ class Shuffle(Module):
             ws = [self.familiar_score(s["file"], now) for s in pool]
         else:
             ws = [self.skip_factor(s["file"], now) for s in pool]
-        pick = self.rng.choices(pool, weights=ws)[0]
-        await d.mpd.prioid(NOMINEE_PRIO, pick["id"])
-        why = self.explain(used, pick["file"], now) + ("" if used == lane else f" (lent by {lane})")
-        self.nominee = {"id": int(pick["id"]), "file": pick["file"], "lane": used, "slot": lane, "why": why}
-        self.reason = ""
+        return used, pool, ws
+
+    def plan_outlook(self, eligible, pick, now, queued, not_resting, top=OUTLOOK_TOP):
+        """The draw after the pick, as rormpc's Shuffle view shows it: its lane and its top candidates with their
+        chance in that draw (if the pick plays and nothing else changes; it is redrawn after every song)."""
+        after = [s for s in eligible if s["file"] != pick["file"]]
+        lane = self.cycle[1] if len(self.cycle) > 1 else "next cycle"
+        used, pool, ws = self.draw_pool(lane if lane != "next cycle" else "familiar", after, now) if after else (
+            "none", [], [])
+        total = sum(ws) or 1
+        ranked = sorted(zip(pool, ws), key=lambda x: -x[1])
+        self.outlook = {
+            "lane": lane, "drawn_from": used, "pool": len(pool), "eligible": len(after), "queued": queued,
+            "resting": queued - not_resting,
+            "top": [{"file": s["file"], "p": round(w / total, 4), "why": self.explain(used, s["file"], now)}
+                    for s, w in ranked[:top]],
+            "rest_p": round(sum(w for _, w in ranked[top:]) / total, 4)}
 
     async def withdraw(self, d):
         """Take back the pick's priority (its lane is not spent)."""

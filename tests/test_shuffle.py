@@ -240,3 +240,15 @@ def test_new_weights_drop_live_outcomes_they_cover(clock):
     sh._weights = (None, sh._weights[1])
     sh.data()
     assert sh.live == []
+
+
+def test_outlook_lists_the_next_draws_candidates_with_chances():
+    data = {"b": heard(30, cadence=10, days_ago=20), "c": heard(5, cadence=10, days_ago=20),
+            "d": heard(5, cadence=10, days_ago=20, liked=True), "e": heard(1, cadence=10, days_ago=20)}
+    d, mpd, sh = setup(data=data, cycle=["familiar", "familiar"])
+    o = sh.outlook
+    assert sh.nominee["file"] == "d" and o["lane"] == "familiar" and o["drawn_from"] == "familiar"
+    files = [t["file"] for t in o["top"]]
+    assert "d" not in files and files[0] == "b"  # the pick is not its own successor; the heaviest first
+    assert sum(t["p"] for t in o["top"]) + o["rest_p"] == pytest.approx(1, abs=0.01)
+    assert player.read_state("shuffle")["outlook"]["top"][0]["why"].startswith("familiar:")
