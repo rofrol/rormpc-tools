@@ -924,6 +924,9 @@ def youtube_playlists(ytid):
     return json.loads(p.stdout.strip().splitlines()[-1])
 
 
+PREVIEW_VERSION = 1  # of `delete --preview`'s JSON, read by rormpc's delete menu
+
+
 def delete(a):
     """Ctrl-x in rmpc (rormpc's delete menu). Songs come from the arguments, else rmpc's $SELECTED_SONGS, else
     $FILE (the playing song). Default: move to the Trash and keep the history (Ctrl-y undoes). --permanent
@@ -938,7 +941,7 @@ def delete(a):
     c, lib, m = db(), library(), mpd()
     rows = c.execute(f"SELECT {', '.join(EVENT_COLS)} FROM events").fetchall()
     if a.preview:
-        out = []
+        out = []  # PREVIEW_VERSION: bump it when a field changes meaning or goes away; rormpc checks it
         for rel in files:
             d = describe(rel, rows, lib, m)
             x = {k: d[k] for k in ("file", "artist", "title", "ytid")} | {
@@ -947,7 +950,7 @@ def delete(a):
             if a.youtube:
                 x["youtube"] = youtube_playlists(d["ytid"])
             out.append(x)
-        print(json.dumps(out, ensure_ascii=False))
+        print(json.dumps({"version": PREVIEW_VERSION, "songs": out}, ensure_ascii=False))
         return
     recs, names = [], []
     with journal_lock():
@@ -1211,6 +1214,9 @@ def missing(a):
 
 
 def main():
+    if sys.argv[1:] == ["--version"]:
+        print(f"musicdb {settings.version()}")
+        return
     if len(sys.argv) > 1 and sys.argv[1] in ("tag", "genre"):
         from . import tags
         return (tags.main_tag if sys.argv[1] == "tag" else tags.main_genre)(sys.argv[2:])

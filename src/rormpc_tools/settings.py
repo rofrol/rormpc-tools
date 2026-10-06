@@ -14,6 +14,16 @@ CONFIG_FILE = pathlib.Path(os.environ.get("RORMPC_TOOLS_CONFIG", XDG_CONFIG / "r
 _file = tomllib.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
 
 
+def version():
+    """The installed rormpc-tools version: `musicdb --version` and `hits --version` print it, rormpc's debuginfo
+    lists it."""
+    from importlib.metadata import PackageNotFoundError, version as installed
+    try:
+        return installed("rormpc-tools")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def _get(key, env, default):
     value = os.environ.get(env) or _file.get(key)
     return default if value in (None, "") else value

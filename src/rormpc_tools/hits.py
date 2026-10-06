@@ -845,6 +845,9 @@ def prefetch(a):
 
 
 def main():
+    if sys.argv[1:] == ["--version"]:
+        print(f"hits {settings.version()}")
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "genres":
         from . import genres
         return genres.main(sys.argv[2:])
