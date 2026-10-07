@@ -10,7 +10,7 @@ They work from the shell too; each one's usage is in its `--help`.
 | `musicdb chart` | a standalone HTML page: my top 10 of each listening year as an animated bar chart race (the weighted shuffle's own picks left out), how my most played songs rose and fell (top 10 ranks, top 100 shares), which source the plays come from |
 | `musicdb lyrics` | lyrics from LRCLIB into `lyrics_dir` (`.lrc` synced, `.txt` plain) for rormpc's Lyrics pane; `candidates` / `use` pick another entry; `translate` takes one song's Polish translation from tekstowo.pl on request (personal use: one song per call, cached in `<song>.pl.json`, never committed anywhere), `lang` overrides the detected language |
 | `mpd-player` | the playback daemon (runs with rormpc closed): silence between songs, Up next, weighted shuffle by plays and likes with "heard enough" cooldowns, pause for a while (plays on at a wall-clock deadline unless anyone did anything meanwhile); commands over MPD messages on channel `rormpc`, see its `--help` |
-| `yt-mp3-mb` | YouTube -> mp3 identified on MusicBrainz, tagged, cover embedded |
+| `yt-mp3-mb` | YouTube -> mp3 identified on MusicBrainz, tagged, cover embedded; `--batch --json` for programs: no questions, uncertain matches left for review, a rerun skips what the target dir has |
 | `yt-playlist` | your YouTube playlists through the YouTube Data API (OAuth), for removing deleted songs |
 
 ## Install
