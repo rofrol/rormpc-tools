@@ -62,8 +62,12 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
 
 - An Up next request becomes playing only after MPD accepts `playid`. A rejected start keeps the waiting
   request and previous playback intact and publishes `upnext.json` with an `error` for rormpc's Up next pane.
-  Newly added Play now songs are registered as waiting before the start, including their random-on priority;
+  Newly added Play now songs are registered as waiting before the start, including their priority;
   a failed start is never mistaken for a completed play at the next daemon wake. There is no automatic retry.
+- Every waiting Up next entry carries an MPD priority (random on or off) before `upnext.json` lists it, and the
+  song playing now is never given one back: MPD resets a song's priority when it starts, so a waiting entry at 0
+  has started, also when it was skipped past between two wakes or played while mpd-player was down. An entry
+  re-found by file under a new id (MPD restart, replaced queue) is not judged and stays waiting.
 - With the weighted shuffle on, Previous goes through mpd-player, never MPD's `previous` (whose change of song the
   daemon and the scrobbler would count as a skip): a client sends `mpc sendmessage rormpc "shuffle prev"`
   (optionally a command id after `prev`). The daemon walks back through the songs that really played, by queue id;

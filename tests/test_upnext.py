@@ -278,3 +278,106 @@ def test_turning_random_on_keeps_the_waiting_entries():
     mpd.rand = True
     asyncio.run(d.step({"options", "player"}))
     assert [e["file"] for e in u.entries] == ["c"] and mpd.prio("c") == 255
+
+
+def skip_through(mpd, *ids):
+    """`mpc next` several times before the daemon wakes: each song starts (MPD resets its priority) and is left."""
+    for id_ in ids:
+        mpd.cur = str(id_)
+        mpd.q[mpd.pos(id_)]["prio"] = 0
+
+
+def test_random_off_entries_skipped_past_between_wakes_count_as_played():
+    d, mpd, u = setup(random=False)
+    send(d, mpd, "upnext add c", "upnext add x")
+    assert mpd.files()[:3] == ["a", "c", "x"] and mpd.prio("c") == 255 and mpd.prio("x") == 254
+    c, x = (e["id"] for e in u.entries)
+    skip_through(mpd, c, x, 2)  # c, x, then b
+    asyncio.run(d.step({"player"}))
+    assert u.entries == [] and u.playing is None
+    assert "x" not in mpd.files() and "c" in mpd.files()
+
+
+def test_random_off_jump_past_entries_keeps_them_waiting_after_the_new_song():
+    d, mpd, u = setup(random=False)
+    send(d, mpd, "upnext add c", "upnext add x")
+    asyncio.run(mpd.playid(4))  # the user jumps to d: only d starts
+    asyncio.run(d.step({"player"}))
+    assert [e["file"] for e in u.entries] == ["c", "x"]
+    assert mpd.files()[mpd.pos(mpd.cur):][:3] == ["d", "c", "x"]
+    assert mpd.prio("c") == 255 and mpd.prio("x") == 254
+
+
+def restart(mpd):
+    """mpd-player starts again with its saved state against the same MPD."""
+    u = upnext.UpNext()
+    d = player.Daemon(mpd, [u])
+    asyncio.run(u.start(d))
+    asyncio.run(d.step({"player", "options", "playlist", "mixer"}))
+    return d, u
+
+
+@pytest.mark.parametrize("random", [False, True])
+def test_entries_that_played_while_the_daemon_was_down_count_as_played(random):
+    d, mpd, u = setup(random=random)
+    send(d, mpd, "upnext add c", "upnext add x", "upnext add d")
+    c, x, dd = (e["id"] for e in u.entries)
+    skip_through(mpd, c, x)  # daemon down: c and x play, x is playing now
+    d, u = restart(mpd)
+    assert [e["file"] for e in u.entries] == ["d"] and u.playing["file"] == "x"
+    assert mpd.prio("d") == 255
+    skip_through(mpd, dd)
+    asyncio.run(d.step({"player"}))
+    assert "x" not in mpd.files() and u.playing["file"] == "d"
+
+
+def test_a_saved_playing_entry_that_ended_while_down_is_finished():
+    d, mpd, u = setup()
+    send(d, mpd, "upnext playnow x")
+    skip_through(mpd, 2)
+    d, u = restart(mpd)
+    assert u.playing is None and "x" not in mpd.files()
+
+
+def test_state_from_before_marks_is_not_judged_once():
+    d, mpd, u = setup(random=False)
+    send(d, mpd, "upnext add c")
+    saved = player.read_state("upnext")
+    del saved["marked"]
+    player.write_state("upnext", saved)
+    mpd.q[mpd.pos(u.entries[0]["id"])]["prio"] = 0  # older versions gave no priority with random off
+    d, u = restart(mpd)
+    assert [e["file"] for e in u.entries] == ["c"] and mpd.prio("c") == 255
+    assert player.read_state("upnext")["marked"] is True
+
+
+def test_mpd_restart_keeps_refound_entries_waiting():
+    d, mpd, u = setup()
+    send(d, mpd, "upnext add c", "upnext add x")
+    # MPD restarted: same queue, new ids; its state file brings the priorities back, c had started (0)
+    mpd.q = [{"id": str(int(s["id"]) + 100), "file": s["file"], "prio": 0 if s["file"] == "c" else s["prio"]}
+             for s in mpd.q]
+    mpd.cur = "101"
+    d, u = restart(mpd)
+    assert [e["file"] for e in u.entries] == ["c", "x"]  # a replaced queue looks the same: not judged
+    assert mpd.prio("c") == 255 and mpd.prio("x") == 254
+
+
+def test_entry_starting_during_priority_writes_keeps_its_reset():
+    d, mpd, u = setup()
+    send(d, mpd, "upnext add c", "upnext add b")
+    c = u.entries[0]["id"]
+    prioid = mpd.prioid
+    raced = []
+
+    async def racing_prioid(prio, id_):
+        if id_ == c and not raced:  # c starts after apply_order read the status, before c's write lands
+            raced.append(id_)
+            skip_through(mpd, c)
+        await prioid(prio, id_)
+
+    mpd.prioid = racing_prioid
+    send(d, mpd, "upnext first " + str(u.entries[1]["id"]))
+    assert raced and mpd.prio("c") == 0
+    asyncio.run(d.step({"player"}))
+    assert u.playing["file"] == "c" and [e["file"] for e in u.entries] == ["b"]

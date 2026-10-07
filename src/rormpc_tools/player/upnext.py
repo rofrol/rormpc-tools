@@ -1,10 +1,10 @@
 """Up next: songs asked for with "Play next" play before the rest of the queue (the source), with rormpc open or
 closed. The whole queue stays in MPD.
 
-With random on the waiting songs get MPD priorities 255, 254, ... in order (MPD resets a song's priority when it
-starts); with random off they are moved right after the current song, in order. A song that was not in the queue
-is added for Up next and deleted again after it played, so the source stays as it was; a song from the source keeps
-its place. Consume must be off (it would delete the source as it plays).
+The waiting songs get MPD priorities 255, 254, ... in order; with random off they are also moved right after the
+current song, in order (MPD ignores priorities there; after the user jumps to a later song they are moved again). A
+song that was not in the queue is added for Up next and deleted again after it played, so the source stays as it
+was; a song from the source keeps its place. Consume must be off (it would delete the source as it plays).
 
 Commands (channel "rormpc"; FILE is a path in the music directory, ID an MPD song id):
   upnext add FILE        append; a song already waiting moves to the top
@@ -14,8 +14,21 @@ Commands (channel "rormpc"; FILE is a path in the music directory, ID an MPD son
   upnext move ID DELTA   move it DELTA places (negative: earlier)
   upnext remove ID       drop it (an added song leaves the queue, a source song loses its priority)
   upnext clear           drop them all
-upnext.json: {"entries": [{"id", "file", "added"}], "playing": {...} or null, "error": str or null}; entries are
-the waiting ones in play order, "playing" the entry that is playing now.
+upnext.json: {"entries": [{"id", "file", "added"}], "playing": {...} or null, "error": str or null, "marked": true};
+entries are the waiting ones in play order, "playing" the entry that is playing now.
+
+When an entry has started, from MPD's state alone: MPD resets a song's priority to 0 whenever it starts (next,
+previous, play, a song ending; random on or off), and nothing else here gives a waiting entry priority 0. So a
+waiting entry whose id still holds its file and whose priority is 0 has started, even when this never saw it play:
+- several `mpc next` between two wakes skip past it (random on or off; with random off the entries then sit before
+  the current song, as they do after the user jumped to a later song, but a jump starts only the song jumped to, so
+  the skipped entries keep their priority and stay waiting);
+- it played while mpd-player was down (checked at startup, before any priority is written).
+This holds because every waiting entry carries its priority in MPD before it is saved ("marked": state from older
+versions, which gave no priority with random off, is not judged once) and the entry playing now is never written
+again (apply_order skips it and puts back a 0 it may have overwritten). An entry re-found by file after an MPD
+restart or a replaced queue (new id) is not judged: MPD's state file brings priorities back, but a replaced queue
+starts at 0 as well, so it stays waiting.
 """
 from . import Module, log, queue_entry, read_state, write_state
 
@@ -29,15 +42,23 @@ class UpNext(Module):
         saved = read_state("upnext") or {}
         self.entries = [e for e in saved.get("entries", []) if {"id", "file", "added"} <= e.keys()]
         self.playing = saved.get("playing")
+        self.marked = bool(saved.get("marked"))  # the saved entries carry their priority in MPD
         self.error = None
         self.current = None  # songid seen playing last time
         self.random = None
 
     def save(self):
-        write_state("upnext", {"entries": self.entries, "playing": self.playing, "error": self.error})
+        write_state("upnext", {"entries": self.entries, "playing": self.playing, "error": self.error,
+                               "marked": True})
 
     async def start(self, d):
-        await self.sync_ids(d)
+        d.status = await d.mpd.status()  # the daemon starts its modules before its first status read
+        if self.marked:
+            # entries that started while this was down; the one playing now is taken by on_status
+            await self.started_unseen(d, int(d.status["songid"]) if "songid" in d.status else None)
+        await self.resync(d)
+        await self.apply_order(d)
+        self.marked = True
         self.save()
 
     async def queue(self, d):
@@ -67,14 +88,34 @@ class UpNext(Module):
             changed = True
         return changed
 
+    async def resync(self, d):
+        """sync_ids, and new ids get their priority at once (a waiting entry at 0 would count as started)."""
+        if await self.sync_ids(d):
+            await self.apply_order(d)
+            return True
+        return False
+
     async def apply_order(self, d):
-        random = d.status.get("random") == "1"
-        current = d.status.get("song")
-        for k, e in enumerate(self.entries):
-            if random:
-                await d.mpd.prioid(max(1, MAX_PRIO - k), e["id"])
-            elif current is not None:
+        """Priorities in order, and with random off places after the current song. MPD plays on while this writes:
+        the song playing now is left alone (MPD reset its priority when it started), and when another one started
+        after its write, its 0 is put back."""
+        live = await d.mpd.status()
+        playing = live.get("songid")
+        written = set()
+        k = 0
+        for e in self.entries:
+            if str(e["id"]) == playing:
+                continue
+            await d.mpd.prioid(max(1, MAX_PRIO - k), e["id"])
+            written.add(str(e["id"]))
+            if live.get("random") != "1" and live.get("song") is not None:
                 await d.mpd.moveid(e["id"], f"+{k}")
+            k += 1
+            now = (await d.mpd.status()).get("songid")
+            if now != playing:
+                playing = now
+                if now in written:
+                    await d.mpd.prioid(0, int(now))
 
     async def finished(self, d, entry):
         """An entry stopped playing: one added only for Up next leaves the queue (if it is still that file)."""
@@ -85,11 +126,11 @@ class UpNext(Module):
 
     async def on_status(self, d, s, changed):
         dirty = False
-        if "playlist" in changed and await self.sync_ids(d):
+        if "playlist" in changed and await self.resync(d):  # new ids carry no priority or place yet
             dirty = True
-            await self.apply_order(d)  # new ids carry no priority or place yet
         song = int(s["songid"]) if "songid" in s else None
-        if song != self.current:
+        moved = song != self.current
+        if moved:
             # the previous song stopped: if it was the Up next entry playing, it has played
             if self.playing and self.playing["id"] != song:
                 await self.finished(d, self.playing)
@@ -102,13 +143,13 @@ class UpNext(Module):
                 self.playing = hit
                 dirty = True
             self.current = song
-        random = s.get("random") == "1"
-        if random and self.random and "player" in changed and await self.started_unseen(d, song):
+        if "player" in changed and await self.started_unseen(d, song):
             dirty = True
-        if random != self.random:
+        random = s.get("random") == "1"
+        if random != self.random or (moved and not random):
             self.random = random
             if self.entries:
-                await self.apply_order(d)  # priorities when random is on, positions when off
+                await self.apply_order(d)  # with random off: after the current song again (after a jump)
         if s.get("state") == "stop" and self.playing:
             await self.finished(d, self.playing)
             self.playing = None
@@ -117,9 +158,8 @@ class UpNext(Module):
             self.save()
 
     async def started_unseen(self, d, song):
-        """Entries that started and were skipped past between two wakes (`mpc next` three times in a row): this never
-        saw them play, but MPD resets the priority of a song that starts, so with random on (since before this wake:
-        turning it on gives the priorities only now) a waiting entry back at 0 has played."""
+        """Entries that started and were skipped past between two wakes (`mpc next` three times in a row) or while
+        this was down: a waiting entry whose MPD priority went back to 0 has played (see the module docstring)."""
         gone = []
         for e in self.entries:
             if e["id"] == song:
@@ -142,7 +182,7 @@ class UpNext(Module):
 
     async def on_message(self, d, verb, args):
         self.error = None
-        await self.sync_ids(d)  # the queue may have changed since the last wake (ids in the command are current)
+        await self.resync(d)  # the queue may have changed since the last wake (ids in the command are current)
         if verb in ("add", "playnow") and d.status.get("consume", "0") != "0":
             self.error = "Up next needs consume off (consume would delete the source as it plays)"
             self.save()
@@ -236,6 +276,6 @@ class UpNext(Module):
             return
         if e["added"]:
             await d.mpd.deleteid(e["id"])
-        elif d.status.get("random") == "1":
+        else:
             await d.mpd.prioid(0, e["id"])
         log(f"upnext: dropped {e['file']}")

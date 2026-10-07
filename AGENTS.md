@@ -18,3 +18,6 @@
   could silently miscount or mismatch a song.
 - Check with `uvx pyflakes src` and run the changed command against MPD; `musicdb sync` writes stickers to the real
   MPD, so test with `MUSICDB`, `MUSICDB_DATA` and `MPD_PORT` pointing at a scratch DB, directory and MPD.
+- Stop a scratch `mpd-player` by this checkout's path (`pkill -f <worktree>/.venv/bin/mpd-player`) or its pid,
+  never `pkill -f mpd-player` or `bin/mpd-player`: that also matches the user's launchd daemon (killed that way
+  on 2026-10-07; launchd restarted it).
