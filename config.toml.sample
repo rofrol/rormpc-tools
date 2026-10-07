@@ -28,3 +28,8 @@
 
 # Contact in the User-Agent that MusicBrainz asks for: your e-mail or a URL [RORMPC_TOOLS_CONTACT]
 #contact = "https://github.com/rofrol/rormpc-tools"
+
+# `musicdb lyrics translate`: when tekstowo.pl has no Polish translation, Claude translates the lyrics line by line
+# through the Claude Code CLI (`claude` on PATH, its own login; the lyrics are sent to Anthropic). The model it
+# uses [RORMPC_TRANSLATE_MODEL]
+#translate_model = "claude-sonnet-5-5"

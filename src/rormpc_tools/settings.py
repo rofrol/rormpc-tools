@@ -60,3 +60,6 @@ SKIPS_LOG = SCROBBLER_DIR / "skips.jsonl"
 HISTORY_TZ = _get("history_timezone", "MUSICDB_TZ", None)
 # contact in the User-Agent that MusicBrainz asks for: an e-mail or URL
 CONTACT = _get("contact", "RORMPC_TOOLS_CONTACT", "https://github.com/rofrol/rormpc-tools")
+# the Claude model that translates lyrics when tekstowo.pl has none (musicdb lyrics translate, through the Claude Code
+# CLI `claude` and its login: no API key is read or stored)
+TRANSLATE_MODEL = _get("translate_model", "RORMPC_TRANSLATE_MODEL", "claude-sonnet-5-5")

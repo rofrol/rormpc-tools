@@ -1,14 +1,19 @@
-"""Polish translations of a song's lyrics from tekstowo.pl, kept beside the lyrics for rormpc's Lyrics pane.
+"""Polish translations of a song's lyrics from tekstowo.pl, or from Claude when it has none, kept beside the lyrics
+for rormpc's Lyrics pane.
 
 One song per call, on demand (`musicdb lyrics translate`): tekstowo.pl has no API, so this reads its HTML (its
 robots.txt allows song and search pages; its terms allow private use). At most three requests per call, 2 s apart:
 the song page under its usual URL, then the site search and the best result when that page is missing or holds
-other lyrics. Nothing crawls or runs in batch.
+other lyrics. Nothing crawls or runs in batch. When tekstowo.pl has no translation (or only other lyrics), Claude
+translates the lyrics through the Claude Code CLI (`claude -p` with its own login, no tools, settings.TRANSLATE_MODEL):
+literally and line by line, the whole song as context, one call per song (two when the line counts come back wrong).
 
 Storage: <lyrics_dir>/<song path stem>.pl.json next to the .lrc/.txt, which stay untouched, and outside index.json:
   state           translated | none (the page has no translation) | not_found | mismatch (pages found hold other
                   lyrics) | instrumental | original_pl (the original is Polish: nothing to translate)
   source, url     "tekstowo.pl" and the song page; kind: human | machine (tekstowo's own AI translation) | mine
+                  or source "claude", kind machine, model (the model id that answered), pairing line
+  note            why there is no machine translation when one was tried (no `claude` on PATH, a line count mismatch…)
   checked_at      when it was fetched
   original_file   lrc | txt; original_hash: fnv1a64 of the original's lines joined by "\\n" (stale when it changes)
   original_lang   ISO 639-1 code, detected once (langdetect) unless original_lang_manual (`musicdb lyrics lang`)
@@ -17,9 +22,10 @@ Storage: <lyrics_dir>/<song path stem>.pl.json next to the .lrc/.txt, which stay
                   that pairs line by line) or none (one unit: the whole text)
   units           [{"ids": [original line ids, consecutive], "text": [translated lines], "line": bool (optional)}]
 Line ids number the original's lines as rormpc reads them: for .lrc every line with a timestamp tag in file order,
-for .txt every line. A translation of kind "mine" is never overwritten.
+for .txt every line. A translation of kind "mine" is never overwritten, nor a human one by a machine translation.
 """
-import datetime as dt, difflib, html.parser, json, re, time, unicodedata, urllib.error, urllib.parse, urllib.request
+import datetime as dt, difflib, html.parser, json, re, shutil, subprocess, tempfile, time, unicodedata, urllib.error
+import urllib.parse, urllib.request
 
 from . import settings
 
@@ -412,6 +418,10 @@ def translate(rel, artist, title, index_state=None):
         save(rel, rec)
         return rec
     rec.update(fetch_translation(lines, artist, title))
+    if rec["state"] in ("none", "not_found", "mismatch"):
+        if old.get("state") == "translated" and old.get("original_hash") == rec["original_hash"]:
+            return old  # a translation of these lyrics stays: a human one always, a machine one costs a call
+        rec.update(machine_translation(lines, artist, title))
     save(rel, rec)
     return rec
 
@@ -462,6 +472,102 @@ def fetch_translation(lines, artist, title):
     return best_miss or {"state": "not_found"}
 
 
+# ---------------------------------------------------------------- Claude
+
+CLAUDE_TIMEOUT = 300  # seconds for one `claude -p` call, an external deadline: 5 lines took 4.4 s (2026-10-07)
+
+LLM_PROMPT = """You translate song lyrics into Polish for a listener who wants to understand them while the song plays.
+Translate literally and line by line: line N of your translation renders line N of the original, with no rhyme, no
+meter and no lines merged, split, added or dropped. Use the whole song as context for meaning, but keep every line
+on its own. A line in Polish already, a name or a sound without meaning ("oh", "na na na") stays as it is.
+
+The song is the JSON below: {n} stanzas with these line counts: {shape}. Answer with JSON only, no prose and no code
+fence, in this shape: {{"stanzas": [{{"lines": ["...", "..."]}}, ...]}}, exactly {n} stanzas, each with exactly as many
+lines as its original stanza.
+
+{song}"""
+
+
+def claude_cli(prompt):
+    """(answer, model id) of Claude Code's answer to `prompt` (`claude -p`, no tools or MCP servers, no saved
+    session, run in an empty temporary directory), or (None, why it failed)."""
+    exe = shutil.which("claude")
+    if not exe:
+        return None, "no `claude` (Claude Code CLI) on PATH"
+    argv = [exe, "-p", "--model", settings.TRANSLATE_MODEL, "--tools", "", "--strict-mcp-config",
+            "--mcp-config", '{"mcpServers":{}}', "--no-session-persistence", "--output-format", "json"]
+    try:
+        with tempfile.TemporaryDirectory(prefix="musicdb-translate-") as cwd:
+            r = subprocess.run(argv, input=prompt, text=True, capture_output=True, cwd=cwd, timeout=CLAUDE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, f"`claude` did not answer within {CLAUDE_TIMEOUT} s"
+    except OSError as e:
+        return None, f"`claude` could not run: {e}"
+    try:
+        payload = json.loads(r.stdout)
+    except ValueError:
+        err = (r.stderr or r.stdout).strip().splitlines()
+        return None, f"`claude` failed (exit {r.returncode}){': ' + err[-1] if err else ''}"
+    if not isinstance(payload, dict):
+        return None, f"`claude` failed (exit {r.returncode})"
+    answer = payload.get("result") or ""
+    if r.returncode or payload.get("is_error") or payload.get("subtype") != "success" or not answer:
+        return None, f"`claude` failed (exit {r.returncode}){': ' + answer.strip()[:200] if answer else ''}"
+    models = payload.get("modelUsage") or {}
+    model = next(iter(models)) if len(models) == 1 else settings.TRANSLATE_MODEL
+    return answer, (models.get(model) or {}).get("canonicalModel") or model
+
+
+def parse_answer(text):
+    """The stanzas (lists of lines) in Claude's JSON answer, None when it is not that JSON."""
+    t = text.strip()
+    fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", t, re.S)
+    if fence:
+        t = fence.group(1)
+    try:
+        got = [st["lines"] for st in json.loads(t)["stanzas"]]
+    except (ValueError, KeyError, TypeError):
+        return None
+    if not all(isinstance(st, list) and all(isinstance(l, str) for l in st) for st in got):
+        return None
+    return got
+
+
+def ask_claude(stanza_lines, artist, title):
+    """(stanzas of lines with the original's line counts, model id, False), or (None, why it failed, retry?)."""
+    song = {"artist": artist or "", "title": title or "", "stanzas": [{"lines": st} for st in stanza_lines]}
+    shape = ", ".join(str(len(st)) for st in stanza_lines)
+    answer, info = claude_cli(LLM_PROMPT.format(n=len(stanza_lines), shape=shape,
+                                                song=json.dumps(song, ensure_ascii=False, indent=1)))
+    if answer is None:
+        return None, info, False
+    got = parse_answer(answer)
+    if got is None:
+        return None, "Claude's answer was not the expected JSON", True
+    if [len(st) for st in got] != [len(st) for st in stanza_lines]:
+        return None, f"Claude's line counts ({', '.join(str(len(st)) for st in got)}) differ from the original's " \
+                     f"({shape})", True
+    return got, info, False
+
+
+def machine_translation(lines, artist, title):
+    """The state, source and units of Claude's translation of these lyrics (line ids kept 1:1), or a note on why
+    there is none; the caller's tekstowo.pl state stays then."""
+    groups = stanzas(lines)
+    if not groups:
+        return {}
+    stanza_lines = [[lines[i] for i in st] for st in groups]
+    for _attempt in range(2):  # one retry, only for a malformed answer: a wrong line count is often a one-off
+        got, info, retry = ask_claude(stanza_lines, artist, title)
+        if not retry:
+            break
+    if got is None:
+        return {"note": f"no machine translation: {info}"}
+    units = [{"ids": [i], "text": [t.strip()]} for st, tr in zip(groups, got) for i, t in zip(st, tr)]
+    return {"state": "translated", "source": "claude", "kind": "machine", "model": info,
+            "pairing": "line", "units": units}
+
+
 def set_lang(rel, code):
     """Override the original's detected language ("auto" detects it again); keeps any translation."""
     rec = load(rel) or {"version": 1, "lang": "pl", "state": "none"}
@@ -489,9 +595,12 @@ def describe(rec):
     s = rec["state"]
     if s == "translated":
         how = {"line": "line by line", "stanza": "by stanza", "none": "whole text"}[rec.get("pairing", "none")]
+        if rec.get("source") == "claude":
+            return f"Polish machine translation ({how}) by {rec.get('model')}"
         return f"Polish translation ({rec.get('kind')}, {how}) from tekstowo.pl"
-    return {"none": "tekstowo.pl has the song but no Polish translation",
+    text = {"none": "tekstowo.pl has the song but no Polish translation",
             "not_found": "tekstowo.pl does not have this song",
             "mismatch": "tekstowo.pl's page holds other lyrics: no translation taken",
             "instrumental": "instrumental: nothing to translate",
             "original_pl": "the original is Polish: nothing to translate"}.get(s, s)
+    return f"{text}; {rec['note']}" if rec.get("note") else text

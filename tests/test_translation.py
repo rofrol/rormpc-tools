@@ -1,6 +1,7 @@
 """musicdb lyrics translate: tekstowo.pl pages parsed, matched against our lyrics and aligned, offline. The pages
-and lyrics here are synthetic (invented text in tekstowo.pl's markup); no fetched lyrics belong in this repo."""
-import json
+and lyrics here are synthetic (invented text in tekstowo.pl's markup); no fetched lyrics belong in this repo. Claude
+is a fake `claude` executable on PATH that answers from a queue; the real one is never on PATH here."""
+import json, sys
 
 import pytest
 
@@ -34,10 +35,56 @@ def search_page(results):
     return f"<h2>Znalezione utwory:</h2>{rows}<h2>Znalezieni artyści:</h2>"
 
 
+FAKE_CLAUDE = """#!{python}
+import json, pathlib, sys
+d = pathlib.Path({dir!r})
+calls = json.loads((d / "calls.json").read_text()) if (d / "calls.json").exists() else []
+calls.append({{"argv": sys.argv[1:], "stdin": sys.stdin.read()}})
+(d / "calls.json").write_text(json.dumps(calls))
+queue = json.loads((d / "answers.json").read_text())
+answer = queue.pop(0)
+(d / "answers.json").write_text(json.dumps(queue))
+print(answer["stdout"])
+sys.exit(answer.get("rc", 0))
+"""
+
+
+class Claude:
+    """A fake Claude Code CLI: `answer()` queues what the next call prints, `calls` lists argv and stdin."""
+
+    def __init__(self, bin_dir, monkeypatch):
+        self.dir = bin_dir
+        monkeypatch.setenv("PATH", str(bin_dir))
+        self.installed = False
+
+    def answer(self, stanzas=None, *, text=None, rc=0, model="claude-sonnet-5-5"):
+        if not self.installed:
+            exe = self.dir / "claude"
+            exe.write_text(FAKE_CLAUDE.format(python=sys.executable, dir=str(self.dir)))
+            exe.chmod(0o755)
+            (self.dir / "answers.json").write_text("[]")
+            self.installed = True
+        if text is None:
+            text = json.dumps({"stanzas": [{"lines": st} for st in stanzas]}, ensure_ascii=False)
+        out = {"type": "result", "subtype": "success", "is_error": rc != 0, "result": text,
+               "modelUsage": {model: {"inputTokens": 1}}}
+        queue = json.loads((self.dir / "answers.json").read_text())
+        queue.append({"stdout": json.dumps(out), "rc": rc})
+        (self.dir / "answers.json").write_text(json.dumps(queue))
+
+    @property
+    def calls(self):
+        f = self.dir / "calls.json"
+        return json.loads(f.read_text()) if f.exists() else []
+
+
 @pytest.fixture
 def lyr(tmp_path, monkeypatch):
     d = tmp_path / "lyrics"
     d.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    Claude(bin_dir, monkeypatch)  # PATH without the real claude: no test reaches it by accident
     for mod in (lyrics, tr):
         monkeypatch.setattr(mod, "LYRICS", d)
     monkeypatch.setattr(lyrics, "INDEX", d / "index.json")
@@ -231,3 +278,100 @@ def test_cli_translate_prints_the_outcome(lyr, env, capsys):
     pages[f"{tr.SITE}/the-band/paper-boats"] = song_page(ORIGINAL, POLISH)
     lyrics.main(["translate", "song.mp3"])
     assert "line by line" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- Claude, when tekstowo.pl has none
+
+POLISH_MT = [["Papierowe łódki płyną w dół rzeki", "Każdego wieczoru, gdy świecą latarnie"],
+             ["Zanieś mnie do domu po srebrnej wodzie", "Zanieś mnie do domu przed porannym śniegiem"]]
+
+
+@pytest.fixture
+def claude(tmp_path, monkeypatch, lyr):
+    return Claude(tmp_path / "bin", monkeypatch)
+
+
+def test_claude_translates_line_by_line_when_tekstowo_has_none(lyr, claude):
+    d, pages, _ = lyr
+    (d / "song.lrc").write_text(lrc(ORIGINAL))
+    pages[f"{tr.SITE}/the-band/paper-boats"] = song_page(ORIGINAL, [])
+    claude.answer(POLISH_MT)
+    rec = tr.translate("song.mp3", "The Band", "Paper Boats")
+    assert rec["state"] == "translated" and rec["source"] == "claude" and rec["kind"] == "machine"
+    assert rec["model"] == "claude-sonnet-5-5" and rec["pairing"] == "line" and rec["checked_at"]
+    assert rec["units"] == [{"ids": [0], "text": [POLISH_MT[0][0]]}, {"ids": [1], "text": [POLISH_MT[0][1]]},
+                            {"ids": [3], "text": [POLISH_MT[1][0]]}, {"ids": [4], "text": [POLISH_MT[1][1]]}]
+    assert rec["url"].startswith(tr.SITE)  # the page that had no translation stays recorded
+    assert tr.load("song.mp3") == rec
+    assert "machine translation" in tr.describe(rec)
+    (call,) = claude.calls
+    assert call["argv"][:3] == ["-p", "--model", "claude-sonnet-5-5"]
+    assert ["--tools", ""] == call["argv"][3:5] and "--no-session-persistence" in call["argv"]
+    assert "Carry me home over the silver water" in call["stdin"] and "2 stanzas" in call["stdin"]
+
+
+def test_claude_also_runs_when_tekstowo_has_not_the_song(lyr, claude):
+    d, _, _ = lyr
+    (d / "song.txt").write_text("\n".join(ORIGINAL) + "\n")
+    claude.answer(text="```json\n" + json.dumps({"stanzas": [{"lines": st} for st in POLISH_MT]}) + "\n```")
+    rec = tr.translate("song.mp3", "The Band", "Paper Boats")
+    assert rec["state"] == "translated" and rec["source"] == "claude"
+
+
+def test_wrong_line_count_retries_once_then_stores_no_translation(lyr, claude):
+    d, pages, _ = lyr
+    (d / "song.txt").write_text("\n".join(ORIGINAL) + "\n")
+    pages[f"{tr.SITE}/the-band/paper-boats"] = song_page(ORIGINAL, [])
+    invented = [POLISH_MT[0] + ["Linia, której nie było"], POLISH_MT[1]]
+    claude.answer(invented)
+    claude.answer(invented)
+    rec = tr.translate("song.mp3", "The Band", "Paper Boats")
+    assert len(claude.calls) == 2
+    assert rec["state"] == "none" and "units" not in rec and "line counts (3, 2)" in rec["note"]
+    assert "line counts" in tr.describe(rec)
+    # the retry is enough when the second answer is right
+    claude.answer(invented)
+    claude.answer(POLISH_MT)
+    assert tr.translate("song.mp3", "The Band", "Paper Boats")["source"] == "claude"
+
+
+def test_failed_call_is_not_retried_and_says_why(lyr, claude):
+    d, pages, _ = lyr
+    (d / "song.txt").write_text("\n".join(ORIGINAL) + "\n")
+    pages[f"{tr.SITE}/the-band/paper-boats"] = song_page(ORIGINAL, [])
+    claude.answer(text="Not logged in · Please run /login", rc=1)
+    rec = tr.translate("song.mp3", "The Band", "Paper Boats")
+    assert len(claude.calls) == 1 and rec["state"] == "none" and "Please run /login" in rec["note"]
+
+
+def test_no_claude_on_path_means_no_translation_and_a_clear_note(lyr):
+    d, pages, _ = lyr
+    (d / "song.txt").write_text("\n".join(ORIGINAL) + "\n")
+    pages[f"{tr.SITE}/the-band/paper-boats"] = song_page(ORIGINAL, [])
+    rec = tr.translate("song.mp3", "The Band", "Paper Boats")
+    assert rec["state"] == "none" and "no `claude`" in rec["note"]
+
+
+def test_human_translation_is_kept_over_a_machine_one(lyr, claude):
+    d, pages, _ = lyr
+    (d / "song.txt").write_text("\n".join(ORIGINAL) + "\n")
+    pages[f"{tr.SITE}/the-band/paper-boats"] = song_page(ORIGINAL, POLISH)
+    human = tr.translate("song.mp3", "The Band", "Paper Boats")
+    pages[f"{tr.SITE}/the-band/paper-boats"] = song_page(ORIGINAL, [])  # the page lost its translation
+    assert tr.translate("song.mp3", "The Band", "Paper Boats") == human and tr.load("song.mp3") == human
+    assert claude.calls == []
+    # a human one found later replaces a machine one
+    (d / "song.txt").write_text("\n".join(ORIGINAL[:2]) + "\n")
+    claude.answer(POLISH_MT[:1])
+    assert tr.translate("song.mp3", "The Band", "Paper Boats")["source"] == "claude"
+    pages[f"{tr.SITE}/the-band/paper-boats"] = song_page(ORIGINAL[:2], POLISH[:2])
+    assert tr.translate("song.mp3", "The Band", "Paper Boats")["kind"] == "human"
+
+
+def test_mine_is_never_sent_to_claude(lyr, claude):
+    d, pages, _ = lyr
+    (d / "song.txt").write_text("\n".join(ORIGINAL) + "\n")
+    tr.save("song.mp3", {"version": 1, "lang": "pl", "state": "translated", "kind": "mine", "units": []})
+    with pytest.raises(RuntimeError):
+        tr.translate("song.mp3", "The Band", "Paper Boats")
+    assert claude.calls == []
