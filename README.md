@@ -11,6 +11,7 @@ They work from the shell too; each one's usage is in its `--help`.
 | `musicdb lyrics` | lyrics from LRCLIB into `lyrics_dir` (`.lrc` synced, `.txt` plain) for rormpc's Lyrics pane; `candidates` / `use` pick another entry; `translate` takes one song's Polish translation from tekstowo.pl on request (personal use: one song per call, cached in `<song>.pl.json`, never committed anywhere), `lang` overrides the detected language |
 | `mpd-player` | the playback daemon (runs with rormpc closed): silence between songs, Up next, weighted shuffle by plays and likes with "heard enough" cooldowns, pause for a while (plays on at a wall-clock deadline unless anyone did anything meanwhile); commands over MPD messages on channel `rormpc`, see its `--help` |
 | `yt-mp3-mb` | YouTube -> mp3 identified on MusicBrainz, tagged, cover embedded; `--batch --json` for programs: no questions, uncertain matches left for review, a rerun skips what the target dir has |
+| `liveplaylist` | a public YouTube playlist as a "live" MPD playlist (rormpc's Live playlists pane): `add URL`, `check` for new tracks, `accept` / `reject` them, `download`, `list`; every command takes `--json` |
 | `yt-playlist` | your YouTube playlists through the YouTube Data API (OAuth), for removing deleted songs |
 
 ## Install
@@ -127,5 +128,15 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   ~/.cache/rormpc-tools/lb-backoff.json); the local steps (scrobbler log, stickers, export, doctor) run every hour.
 - `musicdb doctor` lists silent data errors (duplicate listens, a song in several files, plays credited to no
   file, paths that no longer exist); run it after anything that changes history or moves files.
+- `liveplaylist` keeps a decision (pending / accepted / rejected) apart from a job state (queued / downloading /
+  needs_match / ready / failed) per playlist item, in `<data_dir>/liveplaylists/<id>.json` (atomic writes, a lock
+  in `~/.cache/rormpc-tools/liveplaylist`, progress of the running command in `status.json` there). Every item is
+  reviewed, the first import too; nothing runs on a timer. Rejects are durable. An accepted song already in the
+  library is referenced only on a confirmed match (the same YouTube id in songs.jsonl, or the one recording
+  MusicBrainz links to the video and a library file carries), never by title. A download whose MusicBrainz match
+  is uncertain waits outside the music dir (needs_match). The `.m3u` holds accepted, ready, still listed items in
+  the playlist's order (file names carry no position). Nothing deletes a file; a failed, partial or empty listing
+  marks nothing gone; an item that comes back is active again with its old decision. SIGTERM (rormpc's cancel)
+  kills yt-dlp and queues the item again.
 - Personal data (play history, exports, OAuth secrets, account names) never goes into this repository: it is
   public. Paths and accounts come from the settings, with defaults that assume nothing about the user.
