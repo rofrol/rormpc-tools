@@ -6,12 +6,15 @@
   musicdb lyrics candidates FILE        # what LRCLIB has for a song, as JSON (rormpc's "Choose lyrics…")
   musicdb lyrics use FILE ID            # take this LRCLIB entry for the song
   musicdb lyrics status [--json]        # counts, or every song's state
+  musicdb lyrics translate FILE|--current   # its Polish translation from tekstowo.pl (one song, on request)
+  musicdb lyrics lang FILE CODE|auto    # override the detected language of a song's lyrics (pl: no translation)
 
 Files: <lyrics_dir>/<song path>.lrc for synced lyrics (rmpc: lyrics_dir in its config, same directory),
 <song path>.txt for plain lyrics without timestamps. <lyrics_dir>/index.json records per song: synced, plain,
 instrumental, none (LRCLIB has nothing within 2 s of the file's length) or untagged, with the LRCLIB id and when it
 was checked, so a miss is not asked again until --recheck. LRCLIB matches on duration (about 2 s), so YouTube rips
 with intros or outros often miss; `candidates` + `use` pick another entry by hand.
+Translations: <song path>.pl.json beside the lyrics, outside index.json (see translation.py).
 """
 import argparse, datetime as dt, json, subprocess, sys, urllib.parse
 
@@ -160,6 +163,26 @@ def cmd_status(a):
     print(f"{LYRICS}: " + ", ".join(f"{n} {s}" for s, n in sorted(counts.items())))
 
 
+def cmd_translate(a):
+    from . import translation
+    from .musicdb import mpd
+    if bool(a.current) == bool(a.file):
+        sys.exit("give FILE or --current")
+    rel = current_file() if a.current else a.file
+    artist, title, *_ = song_tags(mpd(), rel)
+    try:
+        rec = translation.translate(rel, artist, title, (load().get(rel) or {}).get("state"))
+    except RuntimeError as e:
+        sys.exit(f"translation: {e}")
+    print(translation.describe(rec))
+
+
+def cmd_lang(a):
+    from . import translation
+    rec = translation.set_lang(a.file, a.code)
+    print(f"lyrics language: {rec['original_lang']}" + (" (set by hand)" if rec["original_lang_manual"] else ""))
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="musicdb lyrics", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
@@ -169,5 +192,8 @@ def main(argv):
     p.set_defaults(fn=cmd_candidates)
     p = sp.add_parser("use"); p.add_argument("file"); p.add_argument("id", type=int); p.set_defaults(fn=cmd_use)
     p = sp.add_parser("status"); p.add_argument("--json", action="store_true"); p.set_defaults(fn=cmd_status)
+    p = sp.add_parser("translate"); p.add_argument("file", nargs="?"); p.add_argument("--current", action="store_true")
+    p.set_defaults(fn=cmd_translate)
+    p = sp.add_parser("lang"); p.add_argument("file"); p.add_argument("code"); p.set_defaults(fn=cmd_lang)
     a = ap.parse_args(argv)
     a.fn(a)

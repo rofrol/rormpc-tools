@@ -7,8 +7,9 @@ license = "BSD-3-Clause"
 requires-python = ">=3.11"
 # google-*: yt-playlist (remove deleted songs from your YouTube playlists), unused until it is set up
 # shazamio: mbtag's last fingerprint fallback; it imports audioop, which Python 3.13 removed
+# langdetect: the language of a song's lyrics (musicdb lyrics translate: Polish originals get no translation)
 dependencies = ["python-mpd2", "mutagen", "google-auth-oauthlib", "google-api-python-client", "shazamio",
-                "audioop-lts; python_version >= '3.13'"]
+                "audioop-lts; python_version >= '3.13'", "langdetect>=1.0.9"]
 
 [project.scripts]
 hits = "rormpc_tools.hits:main"
