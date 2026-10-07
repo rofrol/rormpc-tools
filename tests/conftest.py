@@ -23,12 +23,19 @@ class FakeMPD:
     def __init__(self, songs=()):
         self.songs = [dict(s) for s in songs]
         self.stickers = {}
+        self.playlists = {}  # stored playlists: {name: [file, ...]}
 
     def listallinfo(self):
         return [dict(s) for s in self.songs]
 
     def find(self, _tag, rel):
         return [dict(s) for s in self.songs if s["file"] == rel]
+
+    def listplaylists(self):
+        return [{"playlist": name, "last-modified": "2026-01-01T00:00:00Z"} for name in self.playlists]
+
+    def listplaylist(self, name):
+        return list(self.playlists[name])
 
     def sticker_list(self, _type, f):
         if f not in self.stickers:

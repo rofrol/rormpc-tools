@@ -49,3 +49,38 @@ def test_race_frames_per_year_without_the_shuffles_picks():
     assert [f["year"] for f in race["frames"]] == ["2015", "2016", "2017"]  # empty years kept, as gaps
     assert race["frames"][0]["top"][0] == {"name": "A - x", "plays": 2} and race["frames"][0]["thin"]
     assert race["frames"][2]["top"] == [] and race["left_out"] == 1  # 2017's only play was the shuffle's
+
+
+def test_my_playlists_merges_playlists_and_leaves_out_generated_ones(env):
+    m = env()
+    m.playlists = {"Road trip": ["a", "b", "b"], "Evening": ["b", "c", "http://radio.example/stream"],
+                   "Hits 1980s top100": ["d"], "Skipped": ["e"], "LB Weekly Jams": ["f"], "Folder yt": ["g"],
+                   "My playlists all years top100 · by plays": ["h"], "Tag calm": ["c"]}
+    files, skipped = hits.my_playlists()
+    assert files == {"a": ["Road trip"], "b": ["Evening", "Road trip"], "c": ["Evening", "Tag calm"],
+                     "http://radio.example/stream": ["Evening"]}
+    assert sorted(skipped) == ["Folder yt", "Hits 1980s top100", "LB Weekly Jams",
+                               "My playlists all years top100 · by plays", "Skipped"]
+    assert hits.playlists_reason(["A", "B", "C", "D", "E"]) == "on A, B, C +2"
+
+
+def test_my_playlists_follows_merged_files(env):
+    (musicdb.DATA / "aliases.jsonl").write_text('{"old": "old.mp3", "new": "a"}\n')
+    env().playlists = {"Mix": ["old.mp3", "a"]}
+    assert hits.my_playlists()[0] == {"a": ["Mix"]}  # one entry, under the current path
+
+
+def test_playlists_source_ranks_owned_playlist_songs_by_plays_with_their_playlists_as_reason(monkeypatch):
+    monkeypatch.setattr(hits, "library_songs", lambda: {f: song(f) for f in "abcd"})
+    only = {"a": "on Road trip", "c": "on Evening, Road trip", "zz-not-in-library": "on Evening"}
+    rows = hits.likes_rows([], args(), None, {"a": 5, "b": 50, "c": 9}, {}, only_liked=False, only=only)
+    assert [(r["file"], r["reason"]) for r in rows] == [("c", "on Evening, Road trip"), ("a", "on Road trip")]
+    top = hits.likes_rows([], args(top="1-50"), None, {"a": 5, "c": 9}, {}, only_liked=False, only=only)
+    assert [r["file"] for r in top] == ["c"]
+
+
+def test_playlists_note_names_what_was_left_out():
+    a = args(playlists_used=2, playlists_skipped=["Hits 1980s top100", "Hits 2000s top100", "Skipped"])
+    assert hits.playlists_note(a) == ("rank by your plays among the songs of your 2 playlists; "
+                                      "generated ones left out: Hits, Skipped")
+    assert hits.playlists_note(args(playlists_used=1)) == "rank by your plays among the songs of your 1 playlist"

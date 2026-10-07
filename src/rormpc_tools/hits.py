@@ -16,6 +16,7 @@
   hits prefetch 1959-2025                     # warm the caches (charts + MusicBrainz, ~1 request/s)
   hits --source likes [--sort rediscover]     # your liked songs instead of a chart
   hits --source recs                          # recommendations: artists similar to your most played (LB Radio)
+  hits --source playlists                     # the songs of all your MPD playlists (generated ones left out)
   hits hide --artist A --title T [--mbid M]   # hide a song from every Hits result (log in the data repo)
   hits unhide --artist A --title T; hits hidden [--json]   # undo / review
 
@@ -503,15 +504,20 @@ def rank_rows(rows, a):
     return [s for s in rows if in_top(s["rank"], len(rows), top)] if top else rows[: a.n]
 
 
-def likes_rows(years, a, lib, plays, last, only_liked=True):
-    """Sources "likes" (library songs with rmpc's like sticker = 2) and "library" (every library song): not a chart.
-    Ranked by own plays (--sort plays) or by "rediscover" (played a lot, not lately); the period filters the
-    songs' release year, genres apply, Top % is within the set."""
+def likes_rows(years, a, lib, plays, last, only_liked=True, only=None):
+    """Sources "likes" (library songs with rmpc's like sticker = 2), "library" (every library song) and
+    "playlists" (the songs of `only`, {file: reason}): not a chart. Ranked by own plays (--sort plays) or by
+    "rediscover" (played a lot, not lately); the period filters the songs' release year, genres apply, Top % is
+    within the set."""
     ok, wanted, rows = genre_filter(a.genre), set(years or []), []
     now = dt.datetime.now()
     for f, s in library_songs().items():
         if only_liked and not s["liked"]:
             continue
+        if only is not None:
+            if f not in only:
+                continue
+            s["reason"] = only[f]
         if wanted and s["year"] not in wanted:
             continue
         s.update(points=plays.get(f, 0), peak=plays.get(f, 0))
@@ -521,6 +527,34 @@ def likes_rows(years, a, lib, plays, last, only_liked=True):
         s["score"] = math.log1p(s["points"]) * min(idle_days, 365) if a.sort == "rediscover" else s["points"]
         rows.append(s)
     return rank_rows(rows, a)
+
+
+# playlists the tools write themselves (hits --playlist under each source's label, musicdb lb-playlists, sync's
+# Skipped and Not finished, dedupe's whole-folder dumps): not a choice of songs. "Tag …" playlists (my tags) and
+# liveplaylist's .m3u (every song accepted by me) stay.
+GENERATED_PLAYLISTS = ("Hits ", "My charts ", "Library ", "Likes ", "Recommendations ", "My playlists ", "LB ",
+                       "Folder ", "Skipped", "Not finished")
+
+
+def my_playlists():
+    """Songs of my stored MPD playlists, the generated ones left out: ({file: [playlist names]}, [names left out]).
+    Entries are mapped through musicdb.canon (a merged or moved file); a song on several playlists is one entry."""
+    c, al = musicdb.mpd(), musicdb.aliases()
+    files, skipped = {}, []
+    for p in sorted(c.listplaylists(), key=lambda p: p["playlist"].lower()):
+        name = p["playlist"]
+        if name.startswith(GENERATED_PLAYLISTS):
+            skipped.append(name)
+            continue
+        for f in c.listplaylist(name):
+            names = files.setdefault(musicdb.canon(f, al), [])
+            if name not in names:
+                names.append(name)
+    return files, skipped
+
+
+def playlists_reason(names):
+    return "on " + ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
 
 
 MINE_THIN = 30  # plays in the chosen listening years below which "my charts" says the data is thin
@@ -663,7 +697,7 @@ def show(a):
         years = sorted({y for part in a.years.split(",") if part.strip()
                         for y in range_years(part.strip())})
         groups = [(a.years, years)]
-    elif a.source in ("likes", "recs", "library", "mine") and not a.decade:
+    elif a.source in ("likes", "recs", "library", "mine", "playlists") and not a.decade:
         groups = [("all years", [])]
     else:
         groups = [(d, decade_years(d)) for d in (DECADES if a.decade == "all" else [a.decade or sys.exit("give a decade or --years")])]
@@ -685,17 +719,22 @@ def show(a):
             d = decade_years(a.decade)
             groups = [(a.decade, list(range(d[0] - d[0] % 10, d[0] - d[0] % 10 + 10)))]
         label = label.replace("Hits ", "My charts ", 1) + " · listening years, my plays (the shuffle's picks left out)"
-    if a.source in ("likes", "library"):
+    if a.source in ("likes", "library", "playlists"):
         plays_last = musicdb.counted(musicdb.db(), lib)
         plays, last = plays_last[0], plays_last[1]
-        label = (label.replace("Hits ", "Likes " if a.source == "likes" else "Library ", 1)
-                 + (" · by plays" if a.sort == "plays" else " · rediscover"))
+        name = {"likes": "Likes ", "library": "Library ", "playlists": "My playlists "}[a.source]
+        label = label.replace("Hits ", name, 1) + (" · by plays" if a.sort == "plays" else " · rediscover")
+    if a.source == "playlists":
+        on, a.playlists_skipped = my_playlists()
+        a.playlists_used = len({n for names in on.values() for n in names})
+        reasons = {f: playlists_reason(names) for f, names in on.items()}
     if a.source == "recs":
         label = label.replace("Hits ", "Recommendations ", 1) + " · LB Radio, similar to your most played artists"
     print(f"# {label}   ✓ = in library, plays = your play count")
     for d, years in groups:
         part = (likes_rows(years, a, lib, plays, last) if a.source == "likes"
                 else likes_rows(years, a, lib, plays, last, only_liked=False) if a.source == "library"
+                else likes_rows(years, a, lib, plays, last, only_liked=False, only=reasons) if a.source == "playlists"
                 else mine_rows(years, a, lib) if a.source == "mine"
                 else recs_rows(a, lib, plays) if a.source == "recs" else ranked(years, a, lib))
         if a.source != "billboard":  # no cohort beyond the rows themselves
@@ -786,6 +825,7 @@ def write_json(a, label, rows, plays):
                          else (f"rank by my plays in these listening years ({getattr(a, 'mine_plays', 0)} plays"
                                + (": thin data, a ranking of few plays" if getattr(a, "mine_plays", 0) < MINE_THIN else "")
                                + ")") if a.source == "mine"
+                         else playlists_note(a) if a.source == "playlists"
                          else "rank by your plays among all library songs" if a.source == "library" and a.sort == "plays"
                          else "library songs often played, not lately" if a.source == "library"
                          else "rank by your plays among liked songs" if a.source == "likes" and a.sort == "plays"
@@ -802,6 +842,16 @@ def write_json(a, label, rows, plays):
     tmp.write_text(json.dumps(out, ensure_ascii=False, indent=1))
     tmp.replace(path)
     print(f"json: {path}")
+
+
+def playlists_note(a):
+    """The details line of source "playlists": the ranking and which playlists were left out as generated."""
+    used = getattr(a, "playlists_used", 0)
+    head = (f"rank by your plays among the songs of your {used} playlist{'s' if used != 1 else ''}"
+            if a.sort == "plays" else f"songs of your {used} playlists often played, not lately")
+    left = sorted({next(p for p in GENERATED_PLAYLISTS if n.startswith(p)).strip()
+                   for n in getattr(a, "playlists_skipped", [])})
+    return head + (f"; generated ones left out: {', '.join(left)}" if left else "")
 
 
 def print_rows(rows, plays, a):
@@ -875,12 +925,15 @@ def main():
     ap.add_argument("--top", help='percent ranges of the ranking, e.g. "1-10" or "11-20,21-50" (instead of -n)')
     ap.add_argument("--json", metavar="PATH", help="also write the result as JSON (for rormpc's Hits pane)")
     ap.add_argument("--show-hidden", action="store_true", help="include songs hidden with `hits hide` (marked)")
-    ap.add_argument("--source", choices=["billboard", "likes", "recs", "library", "mine"], default="billboard",
+    ap.add_argument("--source", choices=["billboard", "likes", "recs", "library", "mine", "playlists"], default="billboard",
                     help="billboard: US year-end charts; likes: your liked songs (rmpc like sticker); "
                          "recs: songs of artists similar to your most played ones (ListenBrainz Radio); "
                          "library: every library song by your plays; "
-                         "mine: your own charts, by your plays in the chosen listening years")
-    ap.add_argument("--sort", choices=["plays", "rediscover"], default="plays", help="order for --source likes")
+                         "mine: your own charts, by your plays in the chosen listening years; "
+                         "playlists: the songs of all your MPD playlists by your plays, except the generated ones "
+                         "(hits --playlist's, LB …, Folder …, Skipped, Not finished)")
+    ap.add_argument("--sort", choices=["plays", "rediscover"], default="plays",
+                    help="order for --source likes, library and playlists")
     ap.add_argument("-n", type=int, default=100, help="how many (10/100/1000)")
     ap.add_argument("-g", "--genre", default="", help='e.g. "rock -country" or "hip hop, r&b"')
     ap.add_argument("--artist", default="", help='e.g. "+Queen -Madonna" or "Toto, Queen": artists of the credit '
