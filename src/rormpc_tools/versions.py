@@ -7,6 +7,7 @@
   musicdb versions label FILE VERSION        # original | live | remix | edit | cover | other | clear
   musicdb versions same KEEP OTHER...        # one recording: keep KEEP, merge the others into it (quarantine)
   musicdb versions shared-ok ID              # an MBID / YouTube id on several files is right (e.g. album + video)
+  musicdb versions fingerprint               # fingerprint the groups' files not in the cache yet (slow: fpcalc)
 
 A play matched only by artist + title to a name shared by several files is credited to no file. Here it is
 decided once per source track: a Spotify track URI, a ListenBrainz recording MBID, or, for plays that carry no
@@ -14,10 +15,16 @@ id, the name itself ("name:<artist>|<title>"). Later plays of the same track fol
 an append-only log, versions.jsonl in data_dir, keyed by track and by the file's identity (YouTube id / MBID,
 through aliases.jsonl), never by the normalised name alone. A decision records the group's files when it was
 made: when the group changes (a download, a deletion) it comes back for review (`musicdb doctor`).
+
+Files of a group are also compared by their audio (audiomatch.py): a pair at audiomatch.SAME or more suggests
+"Same recording? audio match 93%" with the file to keep and why (an MBID or the official channel, then the
+longer, the higher bitrate, the more played), confirmed in rormpc's Versions pane, never merged by itself; a
+pair at audiomatch.SIMILAR or more is "similar audio (another master or edit?)". The scores use cached
+fingerprints only; the JSON lists the files still missing (`fingerprint` computes them).
 """
 import argparse, collections, datetime as dt, json, re, sys
 
-from . import musicdb
+from . import audiomatch, musicdb
 
 VERSIONS = ("original", "live", "remix", "edit", "cover", "other")
 MARKERS = {"live": r"\blive\b|\bunplugged\b|\bacoustic\b", "remix": r"\bremix\b|\brmx\b|\bbootleg\b",
@@ -134,6 +141,7 @@ def groups(include_all=False):
         if ms not in ("", None):
             t["longest_s"] = max(t["longest_s"], round(int(ms) / 1000))
     out = []
+    fps, missing, failed = audiomatch.cached(sorted({f for fs in multi.values() for f in fs}))
     for k, fs in sorted(multi.items()):
         rows = []
         for f in fs:
@@ -159,8 +167,123 @@ def groups(include_all=False):
                    if not t["decision"] or t["decision"]["stale"] or t["decision"]["group_changed"]]
         pending += [f"label {r['file']}" for r in rows if not r["version"]]
         if pending or include_all:
-            out.append({"name": k, "files": rows, "tracks": ts_, "pending": pending})
+            audio = {"pairs": audiomatch.pairs({f: fps[f] for f in fs if f in fps}),
+                     "missing": [f for f in fs if f in missing], "failed": [f for f in fs if f in failed]}
+            audio["same"] = same_suggestions(audio["pairs"], rows)
+            out.append({"name": k, "files": rows, "tracks": ts_, "pending": pending, "audio": audio})
     return out
+
+
+def channel_info(rel):
+    """(YouTube channel, description, bitrate in kbps) from the file's tags; empty when unreadable."""
+    try:
+        from . import dedupe
+        f, t = dedupe.tag_map(musicdb.MUSIC / rel)
+    except Exception:
+        return "", "", 0
+    g = lambda *keys: next((str(musicdb.one(getattr(t[k], "text", t[k]))) for k in keys if k in t), "")
+    rate = getattr(getattr(f, "info", None), "bitrate", 0) or 0
+    return g("TXXX:YouTube Channel", "youtube_channel"), g("TXXX:description", "description"), round(rate / 1000)
+
+
+def official(channel, desc, artist, title):
+    """Was it uploaded by the artist or the label? A Topic / VEVO channel, "Provided to YouTube by", the
+    artist's name in the channel, or the channel's name in the artist or title (a remixer's own upload)."""
+    from .mbtag import norm
+    if "provided to youtube by" in desc.lower():
+        return True
+    raw = channel.replace("_", " ").strip()
+    if not raw:
+        return False
+    if raw.lower().endswith(" - topic") or "vevo" in raw.lower():
+        return True
+    ch, a, t = norm(raw), norm(artist), norm(title)
+    return bool(ch) and ((bool(a) and a in ch) or f" {ch} " in f" {a} {t} ")
+
+
+LONGER_S = 2  # files within 2 s count as the same length (padding, a fade): bitrate and plays decide
+# A file this much longer is not an untrimmed copy (a loop, an extended mix with the same start: only the first
+# 120 s were compared), so length does not pick it and the suggestion says to check
+LENGTH_RATIO = 1.25
+
+
+def lengths_differ(rows):
+    d = [r["duration_s"] for r in rows if r["duration_s"]]
+    return bool(d) and max(d) > LENGTH_RATIO * min(d)
+
+
+def keeper(rows):
+    """(file to keep, why) among rows of one recording: an MBID or the official channel, then the longer
+    (untrimmed) file, then the higher bitrate, then more plays, then the name."""
+    facts = {}
+    for r in rows:
+        ch, desc, kbps = channel_info(r["file"])
+        facts[r["file"]] = {"official": bool(r.get("mbid")) or official(ch, desc, r["artist"], r["title"]),
+                            "mbid": bool(r.get("mbid")), "channel": ch.replace("_", " "), "kbps": kbps}
+    rules = [("official", lambda r: facts[r["file"]]["official"]),
+             ("longer", lambda r: r["duration_s"]),
+             ("bitrate", lambda r: facts[r["file"]]["kbps"]),
+             ("plays", lambda r: r["plays"])]
+
+    def beats(x, y):
+        """The first rule where x and y differ: (rule, x wins), or None when they are equal everywhere."""
+        for name, val in rules:
+            vx, vy = val(x), val(y)
+            if name == "longer" and (abs(vx - vy) < LONGER_S or lengths_differ([x, y])):
+                continue
+            if vx != vy:
+                return name, vx > vy
+        return None
+    best = rows[0]
+    for r in rows[1:]:
+        b = beats(r, best)
+        if (b and b[1]) or (not b and r["file"] < best["file"]):
+            best = r
+    why = []
+    for r in rows:
+        if r is best:
+            continue
+        name = (beats(best, r) or ("name", True))[0]
+        f, o = facts[best["file"]], facts[r["file"]]
+        text = {"official": "has a MusicBrainz id" if f["mbid"] else f"official channel ({f['channel'] or 'tags'})",
+                "longer": f"longer: {best['duration_s']} s vs {r['duration_s']} s",
+                "bitrate": f"higher bitrate: {f['kbps']} vs {o['kbps']} kbps",
+                "plays": f"more plays: {best['plays']} vs {r['plays']}",
+                "name": "first by name"}[name]
+        if text not in why:
+            why.append(text)
+    return best["file"], "; ".join(why)
+
+
+def same_suggestions(pairs, rows):
+    """Groups of files whose audio matches (every pair at SAME or more joins them): the file to keep and why.
+    Files labelled as different versions (live and original) are never suggested as one recording."""
+    by_file = {r["file"]: r for r in rows}
+    out = []
+    for files in audiomatch.clusters([p for p in pairs if p["kind"] == "same"]):
+        labels = {by_file[f]["version"] for f in files if by_file[f]["version"]}
+        if len(labels) > 1:
+            continue
+        inside = [p for p in pairs if p["kind"] == "same" and p["a"] in files and p["b"] in files]
+        score = min(p["score"] for p in inside)
+        keep, why = keeper([by_file[f] for f in files])
+        overlap = min(p["overlap_s"] for p in inside)
+        reason = f"audio match {round(score * 100)}% over the first {overlap} s"
+        if lengths_differ([by_file[f] for f in files]):
+            reason += "; lengths differ a lot (" + " vs ".join(f"{by_file[f]['duration_s']} s" for f in files) + \
+                      "): only the start was compared, listen before merging"
+        out.append({"files": files, "score": score, "keep": keep, "keep_reason": why, "reason": reason})
+    return out
+
+
+def fingerprint(_a=None):
+    """Fingerprint the files of every group not in the cache yet (`--json` only reads the cache)."""
+    if not audiomatch.available():
+        sys.exit("fingerprint: fpcalc not found (brew install chromaprint)")
+    lib = musicdb.library()
+    files = sorted({f for fs in lib[2].values() if len(fs) > 1 for f in fs})
+    done, failed = audiomatch.compute(files)
+    print(f"fingerprinted {done} files" + (f", {failed} unreadable" if failed else "") + f" ({len(files)} in groups)")
 
 
 def shared():
@@ -280,6 +403,11 @@ def show(gs):
         print(f"\n{g['name']}  ({len(g['pending'])} open)")
         for r in g["files"]:
             print(f"   {r['duration_s']:4d}s  {r['version'] or '?':8}  {r['plays']:3d} plays  {r['file']}")
+        for s in g["audio"]["same"]:
+            print(f"   Same recording? {s['reason']}: keep {s['keep']} ({s['keep_reason']})")
+        for p in g["audio"]["pairs"]:
+            if p["kind"] == "similar":
+                print(f"   similar audio (another master or edit?) {round(p['score'] * 100)}%: {p['a']} / {p['b']}")
         for t in g["tracks"]:
             d = t["decision"]
             state = ("-> " + (d["file"] or "?stale") if d and d["action"] == "set" else "not owned" if d else "OPEN")
@@ -288,6 +416,9 @@ def show(gs):
             sug = f"   suggest {t['suggest']['file']} ({t['suggest']['reason']})" if t["suggest"] and not d else ""
             print(f"   [{t['source']}] {t['track']}  {t['plays']} plays  {t['album'] or ''}  {state}{sug}")
     print(f"\n{len(gs)} groups, {sum(len(g['pending']) for g in gs)} open items")
+    missing = sum(len(g["audio"]["missing"]) for g in gs)
+    if missing:
+        print(f"{missing} files without an audio fingerprint: musicdb versions fingerprint")
 
 
 def main(argv):
@@ -301,6 +432,7 @@ def main(argv):
     p = sp.add_parser("label"); p.add_argument("file"); p.add_argument("version"); p.set_defaults(fn=label)
     p = sp.add_parser("same"); p.add_argument("keep"); p.add_argument("others", nargs="+"); p.set_defaults(fn=same)
     p = sp.add_parser("shared-ok"); p.add_argument("id"); p.set_defaults(fn=shared_ok)
+    p = sp.add_parser("fingerprint"); p.set_defaults(fn=fingerprint)
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--all", action="store_true", help="also groups with nothing open")
     a = ap.parse_args(argv)
@@ -308,7 +440,9 @@ def main(argv):
         return a.fn(a)
     gs = groups(a.all)
     if a.json:
-        print(json.dumps({"version": 1, "music_dir": str(musicdb.MUSIC), "groups": gs, "shared": shared()},
-                         ensure_ascii=False, indent=1))
+        audio = {"missing": sum(len(g["audio"]["missing"]) for g in gs), "available": audiomatch.available(),
+                 "same": audiomatch.SAME, "similar": audiomatch.SIMILAR}
+        print(json.dumps({"version": 1, "music_dir": str(musicdb.MUSIC), "groups": gs, "shared": shared(),
+                          "audio": audio}, ensure_ascii=False, indent=1))
     else:
         show(gs)

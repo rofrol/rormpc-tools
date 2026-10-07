@@ -112,6 +112,13 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   version I don't own". Decisions live in `versions.jsonl` (append-only) with the file's identity and the
   group's files at the time; a gone file or a changed group sends the decision back for review, never to a
   guessed file. Suggestions (markers, Spotify album, longest play vs file length) are shown, never applied.
+- Files of a Versions group (never the whole library) are compared by audio: chromaprint of the first 120 s
+  (`fpcalc -raw`), the share of equal bits at the best offset within ~7 s, over the overlap only. A pair at
+  0.88 or more is suggested as one recording ("Same recording? audio match 93%", with the file to keep and why),
+  0.72-0.88 is shown as similar audio; nothing is merged without a confirmation. `musicdb versions --json` only
+  reads the fingerprint cache (~/.cache/rormpc-tools/fingerprints.json, per path, size and mtime) and lists the
+  files still missing; `musicdb versions fingerprint` (hourly in `update`, and from rormpc's Versions pane)
+  fills it. Needs fpcalc (chromaprint).
 - `musicdb update` pauses its ListenBrainz steps after a failed run (1, 2, 4 ... 12 hours, state in
   ~/.cache/rormpc-tools/lb-backoff.json); the local steps (scrobbler log, stickers, export, doctor) run every hour.
 - `musicdb doctor` lists silent data errors (duplicate listens, a song in several files, plays credited to no

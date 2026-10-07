@@ -793,6 +793,7 @@ def update(a):
         lb_backoff_record(not lb_failed)
     network(youtube_index_daily)
     network(hits_background)
+    network(versions_fingerprints)
     export(a)
     from . import doctor
     print(doctor.write_summary())
@@ -805,6 +806,13 @@ def hits_background():
     MusicBrainz lookups in 60 s, and some stale ListenBrainz popularity. A new install already has the seed."""
     from . import hits
     hits.prefetch(argparse.Namespace(years=f"{hits.FIRST_YEAR}-{dt.date.today().year - 1}", budget=30, max_seconds=60))
+
+
+def versions_fingerprints():
+    """Audio fingerprints of new files in Versions groups, so the Versions pane finds copies without waiting."""
+    from . import audiomatch, versions
+    if audiomatch.available():
+        versions.fingerprint()
 
 
 PERIODIC = {"daily-jams", "weekly-jams", "weekly-exploration"}
