@@ -1,4 +1,4 @@
-"""mpd-player: the gap module's state machine and the message dispatcher, against a fake async MPD."""
+"""mpd-player: the gap and pause modules' state machines and the message dispatcher, against a fake async MPD."""
 import asyncio, time
 
 import pytest
@@ -120,21 +120,26 @@ def test_an_mpd_error_in_one_module_does_not_stop_the_others():
     assert g.armed_for == "1"
 
 
-# mute: volume 0 for a while, the old volume back at the deadline
+# pause: MPD pauses for a while and plays on at the deadline
 
-class MixerMPD(FakeMPD):
+class PauseMPD(FakeMPD):
+    async def pause(self, v):
+        self.calls.append(("pause", int(v)))
+        self.st["state"] = "pause" if int(v) else "play"
+
     async def setvol(self, v):
         self.calls.append(("setvol", int(v)))
         self.st["volume"] = str(v)
 
 
-def muted(status=None):
-    from rormpc_tools.player import mute
-    mpd = MixerMPD(status or {**PLAY, "volume": "88"})
-    m = mute.Mute()
-    d = player.Daemon(mpd, [m])
-    run(m.start(d))
-    return d, mpd, m
+def paused(status=None, modules=()):
+    from rormpc_tools.player import pause
+    mpd = PauseMPD(status or PLAY)
+    p = pause.Pause()
+    d = player.Daemon(mpd, [*modules, p])
+    for m in d.modules.values():
+        run(m.start(d))
+    return d, mpd, p
 
 
 def send(d, mpd, *msgs):
@@ -142,127 +147,156 @@ def send(d, mpd, *msgs):
     return run(d.step({"message"}))
 
 
-def test_mute_start_then_expiry_restores_the_volume(monkeypatch):
-    d, mpd, m = muted()
-    send(d, mpd, "mute start 300")
-    st = player.read_state("mute")
-    assert mpd.st["volume"] == "0" and st["volume"] == 88 and st["generation"] == 1 and st["error"] is None
-    assert st["deadline"] == pytest.approx(time.time() + 300, abs=1)
-    monkeypatch.setattr(time, "time", lambda: st["deadline"] + 0.1)
+@pytest.fixture
+def clock(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    return now
+
+
+def test_pause_start_then_expiry_plays_on(clock):
+    d, mpd, p = paused()
+    send(d, mpd, "pause start 300")
+    st = player.read_state("pause")
+    assert mpd.st["state"] == "pause" and mpd.calls == [("pause", 1)]
+    assert st == {"deadline": 1300.0, "songid": "1", "generation": 1, "last": "started", "error": None}
+    clock[0] = 1299.9
+    assert run(d.step(set())) is False and mpd.st["state"] == "pause"
+    clock[0] = 1300.1
     assert run(d.step(set())) is True
-    st = player.read_state("mute")
-    assert mpd.st["volume"] == "88" and st["deadline"] is None and st["last"] == "expired"
-    assert ("play",) not in mpd.calls  # expiry never starts playback
+    st = player.read_state("pause")
+    assert mpd.calls[-1] == ("pause", 0) and st["deadline"] is None and st["last"] == "expired"
 
 
-def test_mute_survives_a_restart():
-    from rormpc_tools.player import mute
-    d, mpd, m = muted()
-    send(d, mpd, "mute start 60")
-    again = mute.Mute()
-    assert again.deadline() == m.deadline() and again.volume == 88
+def test_pause_start_while_paused_only_sets_the_timer(clock):
+    d, mpd, p = paused({**PLAY, "state": "pause"})
+    send(d, mpd, "pause start 60")
+    assert mpd.calls == [] and p.deadline() == 1060.0
 
 
-def test_a_volume_set_during_the_mute_cancels_and_is_kept(monkeypatch):
-    d, mpd, m = muted()
-    send(d, mpd, "mute start 60")
-    mpd.st["volume"] = "40"  # mpc volume 40
-    run(d.step({"mixer"}))
-    assert m.deadline() is None and player.read_state("mute")["last"] == "overridden"
-    later = time.time() + 3600
-    monkeypatch.setattr(time, "time", lambda: later)
-    run(d.step(set()))
-    assert mpd.st["volume"] == "40"
-
-
-def test_stop_unmutes_at_once_pause_does_not():
-    d, mpd, m = muted()
-    send(d, mpd, "mute start 60")
+@pytest.mark.parametrize("user", [{"state": "play"}, {"state": "stop"}, {"songid": "7"}])
+def test_anything_the_user_does_cancels_and_nothing_resumes_later(clock, user):
+    d, mpd, p = paused()
+    send(d, mpd, "pause start 60")
+    mpd.st.update(user)  # mpc play / stop / next / a replaced queue
+    run(d.step({"player"}))
+    assert p.deadline() is None and player.read_state("pause")["last"] == "overridden"
     mpd.st["state"] = "pause"
-    run(d.step({"player"}))
-    assert m.deadline() is not None and mpd.st["volume"] == "0"
-    mpd.st["state"] = "stop"  # end of the queue
-    run(d.step({"player"}))
-    assert m.deadline() is None and mpd.st["volume"] == "88"
-    assert player.read_state("mute")["last"] == "stopped"
+    clock[0] += 3600
+    run(d.step(set()))
+    assert ("pause", 0) not in mpd.calls
 
 
-def test_extend_unmute_and_cancel():
-    d, mpd, m = muted()
-    send(d, mpd, "mute start 60")
-    first = m.deadline()
-    send(d, mpd, "mute extend 300")
-    assert m.deadline() == pytest.approx(first + 300)
-    send(d, mpd, "mute cancel")  # forget the timer, stay muted
-    assert m.deadline() is None and mpd.st["volume"] == "0"
-    send(d, mpd, "mute start 60", "mute unmute")
-    # still muted after cancel: a new start is refused (nothing to restore to), so unmute finds no mute
-    assert m.deadline() is None and mpd.st["volume"] == "0"
-    assert player.read_state("mute")["error"] == "not muted"
+def test_extend_resume_and_cancel(clock):
+    d, mpd, p = paused()
+    send(d, mpd, "pause start 60")
+    send(d, mpd, "pause extend 300")
+    assert p.deadline() == 1360.0
+    send(d, mpd, "pause start 600")  # again: a new deadline from now
+    assert p.deadline() == 1600.0 and mpd.calls == [("pause", 1)]
+    send(d, mpd, "pause resume")
+    assert mpd.st["state"] == "play" and player.read_state("pause")["last"] == "resumed"
+    send(d, mpd, "pause start 60", "pause cancel")  # forget the timer, stay paused
+    assert p.deadline() is None and mpd.st["state"] == "pause"
+    clock[0] += 3600
+    run(d.step(set()))
+    assert mpd.st["state"] == "pause" and player.read_state("pause")["last"] == "cancelled"
 
 
-def test_unmute_restores_and_start_again_moves_the_deadline():
-    d, mpd, m = muted()
-    send(d, mpd, "mute start 60")
-    send(d, mpd, "mute start 600")
-    assert m.deadline() == pytest.approx(time.time() + 600, abs=1) and m.volume == 88
-    send(d, mpd, "mute unmute")
-    assert mpd.st["volume"] == "88" and player.read_state("mute")["last"] == "unmuted"
-
-
-def test_mute_refusals_are_reported_in_the_state():
-    d, mpd, m = muted({**PLAY, "state": "stop", "volume": "88"})
-    send(d, mpd, "mute start 60")
-    assert player.read_state("mute")["error"] == "nothing is playing" and mpd.calls == []
-    d, mpd, m = muted({**PLAY, "volume": "-1"})
-    send(d, mpd, "mute start 60")
-    assert player.read_state("mute")["error"] == "MPD has no volume control"
-    for bad in ["mute start 0", "mute start x", "mute extend 60", "mute frob"]:
-        before = player.read_state("mute")["generation"]
+def test_pause_refusals_are_reported_in_the_state():
+    d, mpd, p = paused({**PLAY, "state": "stop"})
+    send(d, mpd, "pause start 60")
+    assert player.read_state("pause")["error"] == "nothing is playing" and mpd.calls == []
+    for bad in ["pause start 0", "pause start x", "pause start 90000", "pause extend 60", "pause resume",
+                "pause cancel", "pause frob"]:
+        before = player.read_state("pause")["generation"]
         send(d, mpd, bad)
-        st = player.read_state("mute")
+        st = player.read_state("pause")
         assert st["generation"] == before + 1 and st["error"]
     assert mpd.calls == []
 
 
-def test_mute_and_gap_leave_each_other_alone(monkeypatch):
-    """A mute that expires inside a gap silence restores the volume and stays paused (the gap presses play); a
-    gap that starts and ends while muted keeps the volume at 0."""
-    from rormpc_tools.player import mute
-    mpd = MixerMPD({**PLAY, "volume": "70"})
-    g, m = gap.Gap(10), mute.Mute()
-    d = player.Daemon(mpd, [g, m])
-    run(g.start(d))
-    run(m.start(d))
+def test_a_restart_keeps_the_timer_and_resumes_a_passed_deadline_only_if_still_paused(clock):
+    from rormpc_tools.player import pause
+    d, mpd, p = paused()
+    send(d, mpd, "pause start 60")
+    clock[0] += 600  # the daemon was down past the deadline
+    again = pause.Pause()
+    assert again.deadline() == 1060.0
+    d2 = player.Daemon(mpd, [again])
+    run(again.start(d2))
+    assert run(d2.step(set())) is True and mpd.calls[-1] == ("pause", 0)
+    assert player.read_state("pause")["last"] == "expired"
+
+    send(d2, mpd, "pause start 60")
+    mpd.st["state"] = "play"  # someone pressed play while the daemon was down
+    clock[0] += 600
+    third = pause.Pause()
+    d3 = player.Daemon(mpd, [third])
+    run(third.start(d3))
+    n = len(mpd.calls)
+    assert run(d3.step(set())) is False and len(mpd.calls) == n
+    assert player.read_state("pause")["last"] == "overridden"
+
+
+def test_a_leftover_mute_json_restores_its_volume_once(state):
+    player.write_state("mute", {"deadline": 123.0, "volume": 77, "generation": 3, "last": "started", "error": None})
+    d, mpd, p = paused({**PLAY, "volume": "0"})
+    assert mpd.calls == [("setvol", 77)] and not (state / "rormpc" / "mute.json").exists()
+    paused({**PLAY, "volume": "0"})  # once: the file is gone
+    player.write_state("mute", {"deadline": None, "volume": 77})  # timer cancelled, stayed muted on purpose
+    d, mpd, p = paused({**PLAY, "volume": "0"})
+    assert mpd.calls == [] and not (state / "rormpc" / "mute.json").exists()
+    player.write_state("mute", {"deadline": 123.0, "volume": 77})
+    d, mpd, p = paused({**PLAY, "volume": "40"})  # someone set a volume since: kept
+    assert mpd.calls == []
+
+
+def test_the_gap_never_plays_inside_a_timed_pause_and_arms_again_after(clock):
+    """A timed pause started during the gap's silence holds: the gap's deadline is dropped, the pause plays on at
+    its own deadline, and the next song ends in a gap again."""
+    g = gap.Gap(10)
+    d, mpd, p = paused({**PLAY, "volume": "70"}, [g])
     run(d.step(set()))  # gap arms oneshot
-    clock = [time.time()]
-    monkeypatch.setattr(time, "time", lambda: clock[0])
-
-    def gap_silence(song):
-        mpd.st.update(state="pause", songid=song, single="0", elapsed="0")
-        run(d.step({"player"}))
-        assert g.deadline() == pytest.approx(clock[0] + 10)
-
-    send(d, mpd, "mute start 5")  # expires inside the silence
-    gap_silence("2")
-    clock[0] += 6
-    run(d.step(set()))
-    assert mpd.st["volume"] == "70" and mpd.st["state"] == "pause" and ("play",) not in mpd.calls
-    assert player.read_state("mute")["last"] == "expired" and g.deadline() is not None
-    clock[0] += 5
-    run(d.step(set()))
-    assert mpd.calls[-1] == ("play",)
-
-    send(d, mpd, "mute start 30")  # outlasts the silence
-    gap_silence("3")
-    assert m.deadline() is not None and mpd.st["volume"] == "0"
-    clock[0] += 11
-    run(d.step(set()))
+    mpd.st.update(state="pause", songid="2", single="0", elapsed="0")  # song 1 ended: the gap's silence
     run(d.step({"player"}))
-    assert mpd.st["state"] == "play" and mpd.st["volume"] == "0" and m.deadline() is not None
-    clock[0] += 20
+    assert g.deadline() == 1010.0
+    clock[0] += 2
+    send(d, mpd, "pause start 60")
+    assert g.deadline() is None and p.deadline() == 1062.0
+    clock[0] += 30  # past the gap's deadline
+    assert run(d.step(set())) is False and ("play",) not in mpd.calls and mpd.st["state"] == "pause"
+    clock[0] = 1062.5
+    assert run(d.step(set())) is True and mpd.calls[-1] == ("pause", 0)
     run(d.step(set()))
-    assert mpd.st["volume"] == "70" and player.read_state("mute")["last"] == "expired"
+    assert mpd.calls[-1] == ("single", "oneshot") and g.armed_for == "2"  # the gap is not lost
+    assert ("play",) not in mpd.calls
+
+
+def test_a_pause_asked_in_the_same_wake_as_the_gaps_silence_holds(clock):
+    """The message is handled before the modules see the status: the gap must not take MPD's pause at 0:00 for its
+    own silence, and a cancelled timer stays paused instead of being resumed by the gap."""
+    g = gap.Gap(10)
+    d, mpd, p = paused(PLAY, [g])
+    run(d.step(set()))
+    mpd.st.update(state="pause", songid="2", single="0", elapsed="0")
+    mpd.messages = ["pause start 60"]
+    run(d.step({"player", "message"}))
+    assert g.deadline() is None and p.deadline() == 1060.0 and p.songid == "2"
+    send(d, mpd, "pause cancel")
+    clock[0] += 3600
+    run(d.step({"player"}))
+    assert mpd.st["state"] == "pause" and ("play",) not in mpd.calls and g.deadline() is None
+
+
+def test_play_pressed_during_a_timed_pause_keeps_the_gap(clock):
+    g = gap.Gap(10)
+    d, mpd, p = paused(PLAY, [g])
+    run(d.step(set()))
+    send(d, mpd, "pause start 60")
+    mpd.st.update(state="play", single="0")  # a phone pressed play; single was reset meanwhile
+    run(d.step({"player"}))
+    assert p.deadline() is None and mpd.calls[-1] == ("single", "oneshot") and g.armed_for == "1"
 
 
 def test_gap_resumes_only_at_its_deadline_and_arms_again(monkeypatch):

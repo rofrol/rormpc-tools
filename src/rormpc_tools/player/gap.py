@@ -3,8 +3,9 @@
 While a song plays, single mode is set to oneshot. MPD 0.24 then pauses at 0:00 of the next song (in queue or
 random order) when the song ends and resets single to off; after N seconds this resumes it. Nothing of the next
 song is heard early. A user pause keeps single at oneshot and the song, so it is never resumed by this; anything
-the user does during the silence (play, next, pause, another song) cancels it. Single on (1) and repeat on are
-left alone. rormpc shows single as "gap" while this runs.
+the user does during the silence (play, next, pause, another song) cancels it, and so does "Pause for…" (the pause
+module holds the pause and plays on itself; the gap arms again once playing). Single on (1) and repeat on are left
+alone. rormpc shows single as "gap" while this runs.
 
 Commands: `gap set N` (seconds, 0 = off, at most 60). The chosen N is kept in gap.json and survives restarts;
 `--seconds` is only the default before anything was chosen. gap.json: {"seconds": N}.
@@ -46,6 +47,10 @@ class Gap(Module):
         song = s.get("songid")
         if self.gap_until and (s.get("state") != "pause" or song != self.gap_until[0]):
             self.gap_until = None  # the user did something during the silence
+        if s.get("state") == "pause" and d.pause_held():  # paused for a while: the pause module plays on
+            self.gap_until = None
+            self.armed_for = None
+            return
         if self.seconds <= 0:
             return
         if s.get("state") == "play" and s.get("single") == "0" and s.get("repeat") == "0":
