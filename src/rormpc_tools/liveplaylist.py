@@ -466,13 +466,13 @@ def download(ids=None):
                 if it.get("job") == "downloading":
                     it["job"] = "queued"
             save(sub)
-    done, failed, errors, failures, arrived, current = 0, 0, [], 0, set(), None
+    done, failed, errors, failures, arrived, current, fetched = 0, 0, [], 0, set(), None, False
     state = "done"
     try:
         # the queue is read again before each item: items accepted while this runs are downloaded too
         while todo := queued(ids):
             sid, yid, title = todo[0]
-            if done or failed:
+            if fetched:  # only after a YouTube request: a library reference asks YouTube nothing
                 time.sleep(random.uniform(*PAUSE))
             current = (sid, yid)
             write_status(running=True, state="running", subscription=sid, current={"ytid": yid, "title": title},
@@ -485,6 +485,7 @@ def download(ids=None):
                 fields = {"job": "failed", "error": f"{type(e).__name__}: {e}"}
             update_item(sid, yid, **fields)
             current = None
+            fetched = fields.get("source") != "library"
             log(sid, ytid=yid, **{k: v for k, v in fields.items() if k != "review"})
             say(f"    {fields['job']}" + (f": {fields['error']}" if fields.get("error") else ""))
             if fields["job"] == "failed":
