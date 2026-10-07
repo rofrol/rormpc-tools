@@ -263,3 +263,38 @@ def test_mute_and_gap_leave_each_other_alone(monkeypatch):
     clock[0] += 20
     run(d.step(set()))
     assert mpd.st["volume"] == "70" and player.read_state("mute")["last"] == "expired"
+
+
+def test_gap_resumes_only_at_its_deadline_and_arms_again(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    d, mpd, g = daemon(PLAY)
+    run(d.step(set()))
+    mpd.st.update(state="pause", songid="2", single="0", elapsed="0")
+    run(d.step({"player"}))
+    assert g.deadline() == 1003.0
+    clock[0] += 2.9
+    run(d.step(set()))
+    assert mpd.calls == [("single", "oneshot")]  # still silent
+    clock[0] += 0.2
+    run(d.step(set()))
+    assert mpd.calls[-1] == ("play",) and g.deadline() is None
+    run(d.step({"player"}))
+    assert mpd.calls[-1] == ("single", "oneshot") and g.armed_for == "2"  # the next song ends in a gap too
+
+
+@pytest.mark.parametrize("user", [{"state": "play"}, {"songid": "3"}, {"state": "stop"}])
+def test_anything_the_user_does_during_the_silence_cancels_it(monkeypatch, user):
+    clock = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    d, mpd, g = daemon(PLAY)
+    run(d.step(set()))
+    mpd.st.update(state="pause", songid="2", single="0", elapsed="0")
+    run(d.step({"player"}))
+    assert g.deadline() is not None
+    mpd.st.update(user)
+    run(d.step({"player"}))
+    assert g.deadline() is None
+    clock[0] += 10
+    run(d.step(set()))
+    assert ("play",) not in mpd.calls
