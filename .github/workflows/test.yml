@@ -1,0 +1,27 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+  # weekly, to catch drift in uv, Python and the runner image; GitHub disables schedules after 60 days without
+  # repository activity
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: "Tests (offline: fake MPD, temporary data dir)"
+        run: uv run pytest -q
+      - name: Pyflakes
+        run: uvx pyflakes src
