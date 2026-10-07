@@ -272,3 +272,17 @@ def test_cancel_requeues_the_item_in_progress(live, capsys, monkeypatch):
     assert code == 1 and out["download"]["state"] == "cancelled"
     assert (items[A]["job"], items[B]["job"], items[C]["job"]) == ("ready", "queued", "queued")
     assert json.loads((lp.CACHE / "status.json").read_text())["state"] == "cancelled"
+
+
+def test_items_accepted_while_the_worker_runs_are_downloaded_too(live, capsys, monkeypatch):
+    call(capsys, "add", URL)
+    ok = yt_mp3_mb.batch
+
+    def accept_b_meanwhile(urls, dir_arg, extra, known):
+        if A in known[1]:
+            assert run("accept", SID, B, "--no-download") == 0
+        return ok(urls, dir_arg, extra, known)
+
+    monkeypatch.setattr(yt_mp3_mb, "batch", accept_b_meanwhile)
+    assert run("accept", SID, A) == 0  # prints two JSON lines: the inner accept's and its own
+    assert live.downloads == [A, B] and sub()["items"][B]["job"] == "ready"

@@ -4,7 +4,7 @@
   liveplaylist check [ID ...]                      # list again: new items wait (pending), gone ones go inactive
   liveplaylist accept ID (YTID ... | --all)        # accept items and download them (--no-download: queue only)
   liveplaylist reject ID YTID ...                  # never download these items (rejects are durable)
-  liveplaylist download [ID ...]                   # one worker (a second one exits): download the queue, resumable
+  liveplaylist download [ID ...]                   # one worker (a second one exits) empties the queue, resumable
   liveplaylist list [ID ...]                       # subscriptions and their items
 
 Every command takes --json: one JSON object on stdout, messages on stderr. ID is the subscription id that `add`
@@ -300,7 +300,7 @@ def cmd_accept(a):
     say(f"{a.id}: {len(changed['queued'])} queued, {len(changed['ready'])} ready")
     result = {"id": a.id, **changed}
     if changed["queued"] and not a.no_download:
-        result["download"] = download([a.id])
+        result["download"] = download()  # the whole queue: one worker serves every subscription
     return result
 
 
@@ -449,8 +449,9 @@ def _cancel(*_):
     raise Cancelled()
 
 
-def download(ids):
-    """Download every queued, accepted item of these subscriptions, one at a time. A second worker exits."""
+def download(ids=None):
+    """Download every queued, accepted item of these subscriptions (None: all), one at a time, until the queue is
+    empty. A second worker exits."""
     CACHE.mkdir(parents=True, exist_ok=True)
     worker = open(CACHE / "worker.lock", "w")
     try:
@@ -459,26 +460,23 @@ def download(ids):
         raise ValueError("a liveplaylist download is already running")
     signal.signal(signal.SIGTERM, _cancel)  # rormpc cancels with SIGTERM: yt-dlp is killed, the item requeued
     with locked():  # a worker that died mid-item left it downloading: queue it again
-        for sid in ids:
+        for sid in ids or all_ids():
             sub = load(sid)
             for it in sub["items"].values():
                 if it.get("job") == "downloading":
                     it["job"] = "queued"
             save(sub)
-    todo = [(sid, it["ytid"], it["title"]) for sid in ids for it in ordered(load(sid))
-            if it["decision"] == "accepted" and it.get("job") == "queued"]
     done, failed, errors, failures, arrived, current = 0, 0, [], 0, set(), None
     state = "done"
     try:
-        for n, (sid, yid, title) in enumerate(todo):
-            it = load(sid)["items"][yid]
-            if it["decision"] != "accepted" or it.get("job") != "queued":
-                continue  # rejected or handled meanwhile
-            if n:
+        # the queue is read again before each item: items accepted while this runs are downloaded too
+        while todo := queued(ids):
+            sid, yid, title = todo[0]
+            if done or failed:
                 time.sleep(random.uniform(*PAUSE))
             current = (sid, yid)
             write_status(running=True, state="running", subscription=sid, current={"ytid": yid, "title": title},
-                         done=done, failed=failed, total=len(todo), errors=errors[-5:])
+                         done=done, failed=failed, total=done + failed + len(todo), errors=errors[-5:])
             say(f"==> {title} ({yid})")
             sub = update_item(sid, yid, job="downloading")
             try:
@@ -512,14 +510,21 @@ def download(ids):
             update_item(*current, job="queued")
     for sid in sorted(arrived):
         mpd_update(load(sid)["dir"])
-    summary = {"state": state, "done": done, "failed": failed, "total": len(todo), "errors": errors}
+    total = done + failed + len(queued(ids))
+    summary = {"state": state, "done": done, "failed": failed, "total": total, "errors": errors}
     write_status(running=False, subscription=None, current=None, **summary)
-    say(f"liveplaylist: {done} done, {failed} failed of {len(todo)}" + (f" ({state})" if state != "done" else ""))
+    say(f"liveplaylist: {done} done, {failed} failed of {total}" + (f" ({state})" if state != "done" else ""))
     return summary
 
 
+def queued(ids):
+    """Accepted items waiting for the worker, in playlist order (ids: these subscriptions, else all)."""
+    return [(sid, it["ytid"], it["title"]) for sid in ids or all_ids() for it in ordered(load(sid))
+            if it["decision"] == "accepted" and it.get("job") == "queued"]
+
+
 def cmd_download(a):
-    return download(a.ids or all_ids())
+    return download(a.ids or None)
 
 
 # ------------------------------------------------------------------ main
