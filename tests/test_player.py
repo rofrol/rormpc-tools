@@ -223,3 +223,43 @@ def test_mute_refusals_are_reported_in_the_state():
         st = player.read_state("mute")
         assert st["generation"] == before + 1 and st["error"]
     assert mpd.calls == []
+
+
+def test_mute_and_gap_leave_each_other_alone(monkeypatch):
+    """A mute that expires inside a gap silence restores the volume and stays paused (the gap presses play); a
+    gap that starts and ends while muted keeps the volume at 0."""
+    from rormpc_tools.player import mute
+    mpd = MixerMPD({**PLAY, "volume": "70"})
+    g, m = gap.Gap(10), mute.Mute()
+    d = player.Daemon(mpd, [g, m])
+    run(g.start(d))
+    run(m.start(d))
+    run(d.step(set()))  # gap arms oneshot
+    clock = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+
+    def gap_silence(song):
+        mpd.st.update(state="pause", songid=song, single="0", elapsed="0")
+        run(d.step({"player"}))
+        assert g.deadline() == pytest.approx(clock[0] + 10)
+
+    send(d, mpd, "mute start 5")  # expires inside the silence
+    gap_silence("2")
+    clock[0] += 6
+    run(d.step(set()))
+    assert mpd.st["volume"] == "70" and mpd.st["state"] == "pause" and ("play",) not in mpd.calls
+    assert player.read_state("mute")["last"] == "expired" and g.deadline() is not None
+    clock[0] += 5
+    run(d.step(set()))
+    assert mpd.calls[-1] == ("play",)
+
+    send(d, mpd, "mute start 30")  # outlasts the silence
+    gap_silence("3")
+    assert m.deadline() is not None and mpd.st["volume"] == "0"
+    clock[0] += 11
+    run(d.step(set()))
+    run(d.step({"player"}))
+    assert mpd.st["state"] == "play" and mpd.st["volume"] == "0" and m.deadline() is not None
+    clock[0] += 20
+    run(d.step(set()))
+    assert mpd.st["volume"] == "70" and player.read_state("mute")["last"] == "expired"
