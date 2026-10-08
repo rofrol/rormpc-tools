@@ -85,8 +85,11 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   retried by `musicdb update`. Deleted events become tombstones that re-imports skip. Listens of a recording that
   another library file still has are not deleted.
 - `hits fetch` puts a download into the library only when its MusicBrainz recording is the chart's own; everything
-  else waits in review outside the music dir. It never retags a file to make it agree. Rejected songs stay in the
-  queue file so they are never fetched again.
+  else waits in review outside the music dir. It never retags a file to make it agree on its own; `accept
+  --as-chart` (the person's decision) writes the chart's artist and title and keeps the YouTube channel, video title
+  and URL in a comment, never the chart's recording MBID. Plain `accept` keeps the current tags, and `accept` fails
+  (the item stays in review) when the staged file is gone. Rejected songs stay in the queue file so they are never
+  fetched again; their video ids are stored on the item, so `retry` and `another` take the next search result.
 - Likes: rmpc's `like` sticker is the source of truth; only changes go to ListenBrainz, and a song without a like
   sticker never clears LB feedback.
 - Skips stay local: nothing about them is sent to ListenBrainz.
