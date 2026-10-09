@@ -49,17 +49,20 @@ def test_hits_json_carries_the_rules_formula_and_counts(env, monkeypatch, tmp_pa
             "artists"} <= set(data)
     assert data["args"] | {"period": None} == {"period": None, "top": "1-100", "genre": "", "artist": "",
                                                "owned": False, "rank": "plays", "years_of": "release",
-                                               "sets": ["-likes"], "show_hidden": False, "source": None,
-                                               "sort": "plays"}
+                                               "sets": ["-likes"], "show_hidden": False,
+                                               "show_excluded": False, "source": None, "sort": "plays"}
     assert data["rules"] == {"schema": 1, "sets": {"likes": -1}, "rank": "plays", "years_of": "release",
                              "period": "1980-1989", "top": "1-100", "genre": "", "artist": "", "owned": False}
     assert data["formula"] == "Library − Likes ∩ 1980-1989 ∩ Top 1-100%"
     assert data["summary"] == "Library − Likes ∩ 1980-1989 ∩ Top 1-100% · 1 of 1"
-    assert data["counts"] == {"selected": 1, "owned": 1, "candidates": 1, "cohort": 2}
+    assert data["counts"] == {"selected": 1, "owned": 1, "candidates": 1, "cohort": 2, "pinned": 0, "excluded": 0}
     [row] = data["rows"]
     assert set(row) == {"rank", "pct", "cohort", "ranked", "artist", "title", "year", "years", "points", "peak",
-                        "listens", "sets", "genres", "mbid", "file", "hidden", "plays", "reason"}
+                        "listens", "sets", "genres", "mbid", "file", "hidden", "plays", "reason", "pinned",
+                        "excluded", "exceptions", "song_id", "chart_key"}
     assert (row["file"], row["rank"], row["cohort"], row["ranked"], row["sets"]) == (SONG["file"], 2, 2, True, [])  # "B" ranks first on the tie
+    assert (row["pinned"], row["excluded"], row["exceptions"], row["song_id"]) == (False, False, [], None)
+    assert row["chart_key"] == hits.hide_key(SONG["artist"], SONG["title"])
 
 
 def test_hits_refuses_top_without_a_rank(monkeypatch):

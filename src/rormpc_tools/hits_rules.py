@@ -239,6 +239,55 @@ def select(cands, members, rules, *, wanted=(), top=None, owned=False, show_hidd
     return rows, {"candidates": len(base), "cohort": len(pop), "pool": visible}
 
 
+# ---------------------------------------------------------------- exceptions
+
+def exception_applies(e, rules):
+    """library always; set:KIND while KIND is a + set (hits_exceptions.applies)."""
+    kind, _, key = e["scope"].partition(":")
+    return e["scope"] == "library" or (kind == "set" and rules.sets.get(key, 0) > 0)
+
+
+def mark(c, rules, exceptions):
+    """Set a candidate's exceptions (each with `applies`), `pinned` and `excluded` (applicable ones only), and
+    `hidden` (an applicable `hits hide`)."""
+    c["exceptions"] = [dict(e, applies=exception_applies(e, rules)) for e in exceptions]
+    on = [e for e in c["exceptions"] if e["applies"]]
+    c["excluded"] = any(e["action"] == "exclude" for e in on)
+    c["pinned"] = any(e["action"] == "pin" for e in on)
+    c["hidden"] = any(e.get("via") == "hide" for e in on)
+
+
+def apply_exceptions(rows, cands, rules, by_key, *, show_excluded=False, pins=True):
+    """The exceptions, after the Top % cut (ranks never move): any applicable exclusion takes a row out (kept,
+    marked, with `show_excluded`), and every applicable pin of an owned song that the rules left out is added
+    after the rows, unranked; a pin beats `-` sets, genres and artists, an exclusion beats any pin. `by_key`:
+    {candidate key: [exceptions]}. Returns (rows, {"pinned", "excluded"}): the rows added by a pin (outside the
+    rules), the rows an exclusion took out (shown or not)."""
+    out, excluded = [], 0
+    for c in rows:
+        mark(c, rules, by_key.get(c["key"], ()))
+        if c["excluded"]:
+            excluded += 1
+            if not show_excluded:
+                continue
+        out.append(c)
+    shown = {c["key"] for c in rows}
+    extra = []
+    for k, es in by_key.items() if pins else ():
+        c = cands.get(k)
+        if k in shown or c is None or not c.get("file"):
+            continue
+        mark(c, rules, es)
+        if c["pinned"] and not c["excluded"]:
+            extra.append(c)
+    extra.sort(key=lambda c: c["order"])
+    last = max((c.get("rank", 0) for c in out), default=0)
+    for j, c in enumerate(extra, 1):
+        c.update(rank=last + j, pct=0, cohort=0, ranked=False)  # a unique row number, shown as "—"
+    out += extra
+    return out, {"pinned": len(extra), "excluded": excluded}
+
+
 # ---------------------------------------------------------------- formula
 
 def _union(names):
@@ -279,8 +328,11 @@ def formula(rules, *, period=None, top=None, genre="", artist="", owned=False):
     return out
 
 
-def summary(text, selected, candidates):
-    return f"{text} · {selected:,} of {candidates:,}"
+def summary(text, selected, candidates, pinned=0, excluded=0):
+    """"… · 1,204 of 8,312", then " · +2 pinned" (rows a pin added, not counted in the first number) and
+    " · 1 excluded" (rows an exclusion took out). rormpc's Hits pane builds the same text (`summary`)."""
+    out = f"{text} · {selected - pinned:,} of {candidates:,}"
+    return out + (f" · +{pinned} pinned" if pinned else "") + (f" · {excluded} excluded" if excluded else "")
 
 
 def fail(err):

@@ -20,6 +20,8 @@
   hits --set +recommended                     # recommendations: artists similar to your most played (LB Radio)
   hits --source likes|library|mine|playlists|recs   # the old shorthands, mapped onto --set/--rank/--years-of
   hits hide --artist A --title T [--mbid M]   # hide a song from every Hits result (log in the data repo)
+  hits except pin|exclude|remove --scope library|set:KIND --file PATH   # an exception to the rules (--help)
+  hits exceptions [--json]                    # every pin and exclusion, the hides included
   hits unhide --artist A --title T; hits hidden [--json]   # undo / review
 
 Selection = (union of + sets, or the whole library when no set is +) − (union of − sets) ∩ period ∩ genres ∩
@@ -32,7 +34,7 @@ Caches: ~/.cache/hits/.
 """
 import argparse, collections, datetime as dt, json, os, pathlib, re, subprocess, sys, time, urllib.parse, urllib.request
 
-from . import hits_rules, mbtag, musicdb, settings
+from . import hits_exceptions, hits_rules, mbtag, musicdb, settings
 
 
 CACHE = pathlib.Path(os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")) / "hits"
@@ -740,13 +742,22 @@ def show(a):
     label = make_label(a, period)
     print(f"# {label}   ✓ = in library, plays = your play count")
     rows, a.candidates, a.cohort, a.mine_plays = [], 0, 0, 0
+    a.pinned = a.excluded = 0
     genre_ok, artist_ok = genre_filter(a.genre), artist_filter(a.artist)
-    for d, years in groups:
+    exceptions = hits_exceptions.active()
+    for gi, (d, years) in enumerate(groups):
         cands, members = candidates(years, a, lib, plays, last)
+        # hides are exclusions now: select keeps them, the exceptions below take them out after the Top % cut
         part, info = hits_rules.select(
-            cands, members, r, wanted=years, top=a.top_ranges, owned=a.owned, show_hidden=a.show_hidden, n=a.n,
+            cands, members, r, wanted=years, top=a.top_ranges, owned=a.owned, show_hidden=True, n=a.n,
             artist_ok=(lambda c: artist_ok(c["artist"])) if a.artist else (lambda c: True),
             genre_ok=(lambda c: genre_ok(genres(c))) if a.genre else (lambda c: True))
+        # pins once, in the last group (one list per decade would repeat them)
+        part, xinfo = hits_rules.apply_exceptions(
+            part, cands, r, hits_exceptions.by_candidate(cands, exceptions, hide_key),
+            show_excluded=a.show_excluded, pins=gi == len(groups) - 1)
+        a.pinned += xinfo["pinned"]
+        a.excluded += xinfo["excluded"]
         a.candidates += info["candidates"]
         a.cohort += info["cohort"]
         if r.rank == "plays" and r.years_of == "listened":
@@ -759,7 +770,7 @@ def show(a):
         print_rows(part, plays, a)
         rows += part
     have = [s for s in rows if s["file"]]
-    a.summary = hits_rules.summary(a.formula, len(rows), a.candidates)
+    a.summary = hits_rules.summary(a.formula, len(rows), a.candidates, a.pinned, a.excluded)
     print(f"\n{len(have)}/{len(rows)} in library · {a.summary}")
     if a.json:
         write_json(a, label, rows, plays)
@@ -861,7 +872,9 @@ def rank_note(a):
 
 def write_json(a, label, rows, plays):
     """Versioned result file for rormpc's Hits pane, written atomically (the pane may read it any time). Version
-    1 gained fields only: "rules", "formula", "summary", "counts", args.sets/years_of, rows' "ranked" and "sets"
+    1 gained fields only: "rules", "formula", "summary", "counts", args.sets/years_of, rows' "ranked" and "sets";
+    then (exceptions) counts.pinned/excluded, args.show_excluded, rows' "pinned", "excluded", "exceptions",
+    "song_id" and "chart_key"
     (rormpc's hits.rs parses a copy of this shape in its tests; tests/test_rormpc_contract.py checks this side)."""
     r = a.rules
     owned = sum(1 for s in rows if s["file"])
@@ -871,18 +884,25 @@ def write_json(a, label, rows, plays):
            "args": {"period": a.years or a.decade, "top": a.top, "genre": a.genre, "artist": a.artist,
                     "owned": a.owned, "rank": r.rank, "years_of": r.years_of,
                     "sets": [("+" if v > 0 else "-") + k for k, v in r.sets.items()],
-                    "show_hidden": a.show_hidden, "source": r.source, "sort": a.sort},
+                    "show_hidden": a.show_excluded, "show_excluded": a.show_excluded, "source": r.source,
+                    "sort": a.sort},
            "rules": hits_rules.as_dict(r) | {"period": a.years or a.decade, "top": a.top if a.top_ranges else None,
                                               "genre": a.genre, "artist": a.artist, "owned": a.owned},
            "formula": a.formula, "summary": a.summary,
-           "counts": {"selected": len(rows), "owned": owned, "candidates": a.candidates, "cohort": a.cohort},
+           "counts": {"selected": len(rows), "owned": owned, "candidates": a.candidates, "cohort": a.cohort,
+                      "pinned": a.pinned, "excluded": a.excluded},
            "rank_note": rank_note(a),
            "rows": [{"rank": s["rank"], "pct": s["pct"], "cohort": s["cohort"], "ranked": s["ranked"],
                      "artist": s["artist"], "title": s["title"], "year": row_year(s, r), "years": row_years(s),
                      "points": s.get("points", s.get("plays", 0)), "peak": s.get("peak", s.get("plays", 0)),
                      "listens": s.get("listens", 0), "sets": s.get("sets", []),
                      "genres": genres(s)[:5], "mbid": s.get("mbid"), "file": s["file"], "hidden": s.get("hidden", False),
-                     "plays": plays.get(s["file"], 0) if s["file"] else 0, "reason": s.get("reason")} for s in rows]}
+                     "plays": plays.get(s["file"], 0) if s["file"] else 0, "reason": s.get("reason"),
+                     "pinned": s.get("pinned", False), "excluded": s.get("excluded", False),
+                     "exceptions": [{k: e.get(k) for k in ("id", "action", "scope", "applies", "via")}
+                                    for e in s.get("exceptions", [])],
+                     "song_id": hits_exceptions.id_of_file(s["file"]) if s["file"] else None,
+                     "chart_key": hide_key(s["artist"], s["title"])} for s in rows]}
     path = pathlib.Path(a.json).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -907,7 +927,8 @@ def print_rows(rows, plays, a):
         score = f"{s.get('listens', 0):>9,}" if a.rules.order == "listens" else f"{s.get('peak', s.get('plays', 0)):>4}"
         g = ", ".join(genres(s)[:3])
         rank = f"{s['rank']:4d}." if s["ranked"] else "   —."
-        print(f"{rank}{'h' if s.get('hidden') else ' '}{have} {k or '':>4} {score}  {s['artist']} - {s['title']}  ({min(row_years(s), default='?')}; {g})"
+        flag = "⊘" if s.get("excluded") else "✚" if s.get("pinned") else " "
+        print(f"{rank}{flag}{have} {k or '':>4} {score}  {s['artist']} - {s['title']}  ({min(row_years(s), default='?')}; {g})"
               + (f"  [{s['reason']}]" if s.get("reason") else ""))
 
 
@@ -956,6 +977,10 @@ def main():
         return fetch.main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] in ("hide", "unhide", "hidden"):
         return hide_cmd(sys.argv[1:])
+    if len(sys.argv) > 1 and sys.argv[1] == "except":
+        return hits_exceptions.except_cmd(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "exceptions":
+        return hits_exceptions.list_cmd(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "prefetch":
         ap = argparse.ArgumentParser(prog="hits prefetch")
         ap.add_argument("cmd"); ap.add_argument("years", nargs="?", default=f"{FIRST_YEAR}-{dt.date.today().year - 1}")
@@ -976,7 +1001,8 @@ def main():
     ap.add_argument("--years", help="year ranges instead of a decade, e.g. 1985-1992 or 1970-1979,1990-1999 (one pooled ranking)")
     ap.add_argument("--top", help='percent ranges of the ranking, e.g. "1-10" or "11-20,21-50" (instead of -n)')
     ap.add_argument("--json", metavar="PATH", help="also write the result as JSON (for rormpc's Hits pane)")
-    ap.add_argument("--show-hidden", action="store_true", help="include songs hidden with `hits hide` (marked)")
+    ap.add_argument("--show-excluded", "--show-hidden", dest="show_excluded", action="store_true",
+                    help="keep the excluded songs (`hits except exclude`, `hits hide`) in the result, marked ⊘")
     ap.add_argument("--set", action="append", metavar="±KIND",
                     help="a set chip, repeatable: +KIND includes, -KIND excludes; KIND: billboard (US year-end "
                          "charts), likes (rmpc like sticker), playlists (all your MPD playlists except the generated "
