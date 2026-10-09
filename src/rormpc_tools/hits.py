@@ -14,20 +14,25 @@
   hits 1980s --top 1-10 --artist "+Queen +Toto"   # their songs in the 1980s top 10% (ranks within the decade)
   hits 1980s --top 1-10 --json ~/.cache/rormpc/hits/current.json  # result file for rormpc's Hits pane
   hits prefetch 1959-2025                     # warm the caches (charts + MusicBrainz, ~1 request/s)
-  hits --source likes [--sort rediscover]     # your liked songs instead of a chart
-  hits --source recs                          # recommendations: artists similar to your most played (LB Radio)
-  hits --source playlists                     # the songs of all your MPD playlists (generated ones left out)
+  hits --set +likes --rank rediscover        # your liked songs, often played but not lately
+  hits 1980s --set +billboard --set +likes --set -playlists --top 1-10   # (Billboard ∪ Likes) − Playlists
+  hits --years 1990-1999 --rank plays --years-of release --top 1-10     # my most played songs released then
+  hits --set +recommended                     # recommendations: artists similar to your most played (LB Radio)
+  hits --source likes|library|mine|playlists|recs   # the old shorthands, mapped onto --set/--rank/--years-of
   hits hide --artist A --title T [--mbid M]   # hide a song from every Hits result (log in the data repo)
   hits unhide --artist A --title T; hits hidden [--json]   # undo / review
 
-Ranking "chart" = the song's best year-end position in the chosen years (101 - position); points summed over
+Selection = (union of + sets, or the whole library when no set is +) − (union of − sets) ∩ period ∩ genres ∩
+artists ∩ Top % ∩ owned (hits_rules.py). Top % is cut in the rank's own population, so a song's rank never depends
+on the sets or filters. `--set -KIND` may be written as is (it is read as `--set=-KIND`).
+Rank "billboard" = the song's best year-end position in the chosen years (101 - position); points summed over
 years only break ties. Genres come from the recording's
 MusicBrainz genres/tags, falling back to the artist's. Library matching and play counts reuse musicdb.
 Caches: ~/.cache/hits/.
 """
-import argparse, datetime as dt, json, math, os, pathlib, re, subprocess, sys, time, urllib.parse, urllib.request
+import argparse, collections, datetime as dt, json, os, pathlib, re, subprocess, sys, time, urllib.parse, urllib.request
 
-from . import mbtag, musicdb, settings
+from . import hits_rules, mbtag, musicdb, settings
 
 
 CACHE = pathlib.Path(os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")) / "hits"
@@ -271,10 +276,11 @@ LB_POP_BATCH = 25
 LB_DOWN_MIN = 20  # after a failed request, ListenBrainz is not asked again for this long (no waiting on every Apply)
 
 
-def lb_popularity(mbids):
+def lb_popularity(mbids, cached_only=False):
     """ListenBrainz listen counts, only a tie-breaker. Cached per MBID for LB_POP_TTL_D days; only missing or
     stale ones are fetched, with one attempt and a short timeout; when LB fails it is left alone for LB_DOWN_MIN
-    minutes and the ranking uses what the cache has (a timeout never becomes "0 listens")."""
+    minutes and the ranking uses what the cache has (a timeout never becomes "0 listens"). cached_only: what the
+    cache has, nothing fetched."""
     db, now = cache_db(), time.time()
     mbids = sorted({m for m in mbids if m})
     out, missing = {}, []
@@ -289,7 +295,7 @@ def lb_popularity(mbids):
             if m not in got or now - got[m][1] > LB_POP_TTL_D * 86400:
                 missing.append(m)
     down = db.execute("SELECT down_until FROM health WHERE service = 'lb_pop'").fetchone()
-    if missing and down and down[0] > now:
+    if cached_only or (missing and down and down[0] > now):
         return out
     for i in range(0, len(missing), LB_POP_BATCH):
         r = mbtag.http("https://api.listenbrainz.org/1/popularity/recording", host_interval=0.5,
@@ -422,58 +428,7 @@ def coverage(decade):
     return f"{ys[0]}" if len(ys) == 1 else f"{ys[0]}-{ys[-1]}"
 
 
-def parse_top(spec):
-    """'1-10,11-20' -> [(1, 10), (11, 20)] percent ranges of the rank."""
-    out = []
-    for part in filter(None, (x.strip() for x in (spec or "").split(","))):
-        lo, _, hi = part.partition("-")
-        out.append((int(lo), int(hi or lo)))
-    return out
-
-
-def in_top(i, n, ranges):
-    """Is rank i (1-based) of n inside one of the percent ranges? Top 10% = ranks 1..ceil(0.1 n)."""
-    return any(math.ceil((lo - 1) / 100 * n) < i <= math.ceil(hi / 100 * n) for lo, hi in ranges)
-
-
-def ranked(years, a, lib):
-    """Songs of the years that pass the genre filter, best first, each with rank and pct within that cohort.
-    Cut: --top percent ranges of the whole cohort (unowned songs count), else the top a.n; --owned keeps only
-    songs in the library, applied after the cut so owning a song never shifts the others' ranges."""
-    songs = list(entries(years).values())
-    ok = genre_filter(a.genre)
-    rows = []
-    for s in songs:
-        s.update(mb_song(s["title"], s["artist"], s["year"]))
-        if a.genre and not ok(genres(s)):
-            continue
-        s["file"], _ = musicdb.match(lib, None, s.get("mbid"), s["artist"], s["title"], any_copy=True)
-        rows.append(s)
-    pop = lb_popularity([s.get("mbid") for s in rows])
-    for s in rows:
-        s["listens"] = pop.get(s.get("mbid"), 0)
-    # every year's #1 gets 100 points, so ties are common: break them by ListenBrainz listens
-    # chart rank = the song's best single year; summing years would favour songs that charted in two years
-    # over bigger one-year hits. The sum only breaks ties, then ListenBrainz listens.
-    key = ((lambda s: (-s["listens"], s["best"], s["title"])) if a.rank == "listens"
-           else (lambda s: (-s["peak"], -s["points"], -s["listens"], s["title"])))
-    rows = sorted(rows, key=key)
-    for i, s in enumerate(rows, 1):
-        s["rank"], s["pct"], s["cohort"] = i, round(100 * i / len(rows), 1), len(rows)
-    # hidden songs stay in the cohort (ranks and Top % of the others never move) and are removed after the cut
-    hidden = hidden_set()
-    for s in rows:
-        s["hidden"] = hide_key(s["artist"], s["title"]) in hidden
-    # the artist picker lists the artists of the whole cohort (before the Top % cut)
-    for k, (name, n) in count_artists([s for s in rows if a.show_hidden or not s["hidden"]]).items():
-        a.cohort_artists.setdefault(k, [name, 0])[1] += n
-    top = parse_top(a.top)
-    if top:
-        rows = [s for s in rows if in_top(s["rank"], len(rows), top)]
-    else:
-        rows = rows[: a.n] if not a.owned else rows
-    rows = [s for s in rows if (s["file"] or not a.owned) and (a.show_hidden or not s["hidden"])]
-    return rows if top or not a.owned else rows[: a.n]
+parse_top, in_top = hits_rules.parse_top, hits_rules.in_top
 
 
 def library_songs():
@@ -493,40 +448,6 @@ def library_songs():
                   "artist_mbid": one("musicbrainz_artistid") or None, "tags": [], "listens": 0, "hidden": False,
                   "liked": f in liked}
     return out
-
-
-def rank_rows(rows, a):
-    """Rank by "score" (then artist, title), number them, cut by Top % or -n."""
-    rows.sort(key=lambda s: (-s["score"], s["artist"], s["title"]))
-    for i, s in enumerate(rows, 1):
-        s["rank"], s["pct"], s["cohort"] = i, round(100 * i / len(rows), 1), len(rows)
-    top = parse_top(a.top)
-    return [s for s in rows if in_top(s["rank"], len(rows), top)] if top else rows[: a.n]
-
-
-def likes_rows(years, a, lib, plays, last, only_liked=True, only=None):
-    """Sources "likes" (library songs with rmpc's like sticker = 2), "library" (every library song) and
-    "playlists" (the songs of `only`, {file: reason}): not a chart. Ranked by own plays (--sort plays) or by
-    "rediscover" (played a lot, not lately); the period filters the songs' release year, genres apply, Top % is
-    within the set."""
-    ok, wanted, rows = genre_filter(a.genre), set(years or []), []
-    now = dt.datetime.now()
-    for f, s in library_songs().items():
-        if only_liked and not s["liked"]:
-            continue
-        if only is not None:
-            if f not in only:
-                continue
-            s["reason"] = only[f]
-        if wanted and s["year"] not in wanted:
-            continue
-        s.update(points=plays.get(f, 0), peak=plays.get(f, 0))
-        if a.genre and not ok(genres(s)):
-            continue
-        idle_days = (now - dt.datetime.fromisoformat(last[f])).days if last.get(f) else 3650
-        s["score"] = math.log1p(s["points"]) * min(idle_days, 365) if a.sort == "rediscover" else s["points"]
-        rows.append(s)
-    return rank_rows(rows, a)
 
 
 # playlists the tools write themselves (hits --playlist under each source's label, musicdb lb-playlists, sync's
@@ -558,31 +479,6 @@ def playlists_reason(names):
 
 
 MINE_THIN = 30  # plays in the chosen listening years below which "my charts" says the data is thin
-
-
-def mine_rows(years, a, lib):
-    """Source "mine": my own charts, songs ranked by how often I played them in the chosen LISTENING years (all
-    years when none is chosen), from the play history. The weighted shuffle's own picks are left out (they show
-    what the algorithm chose, not me). Genres apply; Top % is within the set."""
-    stamps = {}
-    musicdb.counted(musicdb.db(), lib, stamps)
-    auto = musicdb.auto_starts()
-    songs, wanted, ok = library_songs(), set(years or []), genre_filter(a.genre)
-    rows, total = [], 0
-    for f, ts_list in stamps.items():
-        own = [musicdb.ts_epoch(t) for t in ts_list]
-        picks = auto.get(f, [])
-        kept = [t for t, e in zip(ts_list, own) if not any(p - 120 <= e <= p + 1800 for p in picks)]
-        n = sum(1 for t in kept if not wanted or int(t[:4]) in wanted)
-        if not n or f not in songs:
-            continue
-        s = dict(songs[f], points=n, peak=n, score=n)
-        if a.genre and not ok(genres(s)):
-            continue
-        total += n
-        rows.append(s)
-    a.mine_plays = total
-    return rank_rows(rows, a)
 
 
 RECS_SEEDS = 8  # most played artists used as seeds
@@ -644,10 +540,11 @@ def lb_metadata(mbids):
     return {m: cache[m] for m in mbids if m in cache}
 
 
-def recs_rows(a, lib, plays):
-    """Source "recs": recordings of artists similar to the ones I play most (ListenBrainz Radio), not owned and not
-    hidden. Each row says which seeds led to it; more seeds pointing at a recording rank it higher, then the seeds
-    take turns, each with its most listened recordings first. No year (LB has none for these); genre filter on recording tags, else artist tags."""
+def recs_candidates(a, lib, plays):
+    """Set "recommended": recordings of artists similar to the ones I play most (ListenBrainz Radio), not owned.
+    Each says which seeds led to it; more seeds pointing at a recording come first, then the seeds take turns,
+    each with its most listened recordings first (their `order`; they have no rank of their own). No year (LB has
+    none for these); genres from the recording's tags, else the artist's."""
     from .genres import with_tag_genres
     seeds = recs_seeds(lib, plays)
     found = {}
@@ -662,7 +559,7 @@ def recs_rows(a, lib, plays):
                 x["weight"] += w
                 x["turn"] = min(x["turn"], turn)
     meta = lb_metadata(list(found))
-    ok, hidden, rows = genre_filter(a.genre), hidden_set(), []
+    hidden, rows = hidden_set(), []
     for mbid, x in found.items():
         m = meta.get(mbid)
         if not m:
@@ -670,85 +567,200 @@ def recs_rows(a, lib, plays):
         artist, title = m["artist"]["name"], m["recording"]["name"]
         if musicdb.match(lib, None, mbid, artist, title, any_copy=True)[0]:
             continue
-        key = hide_key(artist, title)
-        if key in hidden and not a.show_hidden:
-            continue
         rec_tags = [t["tag"] for t in m.get("tag", {}).get("recording", []) if t.get("count", 0) >= 2]
         art_tags = m.get("tag", {}).get("artist", [])
         art_genres = sorted(with_tag_genres([t for t in art_tags if t.get("genre_mbid")], art_tags, artist=True), key=lambda t: -t.get("count", 0))
         tags = rec_tags or [t.get("name") or t["tag"] for t in art_genres][:5]
-        if a.genre and not ok(tags):
-            continue
-        rows.append({"artist": artist, "title": title, "file": None, "year": 0, "years": [], "mbid": mbid,
-                     "tags": tags, "points": x["weight"], "peak": len(x["seeds"]), "listens": x["listens"], "turn": x["turn"],
-                     "hidden": key in hidden, "reason": "similar to " + ", ".join(x["seeds"][:3])})
+        rows.append({"key": f"rec:{mbid}", "artist": artist, "title": title, "file": None, "release": 0, "years": [],
+                     "chart_years": [], "mbid": mbid, "tags": tags, "points": x["weight"], "peak": len(x["seeds"]),
+                     "listens": x["listens"], "turn": x["turn"], "plays": 0,
+                     "hidden": hide_key(artist, title) in hidden, "reason": "similar to " + ", ".join(x["seeds"][:3])})
     # seeds take turns (each one's most listened first), so the most played artist doesn't fill the whole list
     rows.sort(key=lambda s: (-s["peak"], s["turn"], -s["points"], s["artist"]))
-    for i, s in enumerate(rows, 1):
-        s["rank"], s["pct"], s["cohort"] = i, round(100 * i / len(rows), 1), len(rows)
-    top = parse_top(a.top)
-    return [s for s in rows if in_top(s["rank"], len(rows), top)] if top else rows[: a.n]
+    for i, s in enumerate(rows):
+        s["order"] = (0, i)
+    return rows
+
+
+def song_order(c):
+    """Order of unranked rows: recommendations keep theirs (0, i), every other song by artist and title."""
+    return (1, fold(c["artist"]), fold(c["title"]))
+
+
+def chart_years_for(rules, years):
+    """The chart years to read: the period's when Years of is the chart year, else every finished chart (a song
+    released in the period may chart in any year)."""
+    if rules.years_of == "chart" and years:
+        return years
+    return list(range(FIRST_YEAR, dt.date.today().year))
+
+
+def chart_candidates(cands, members, years, a, lib, plays):
+    """Add the Billboard rows of the chart years: merged into the library song they match (the chart's artist and
+    title shown, as in the chart), else a missing row "chart:<name key>". Hidden chart songs are marked."""
+    r, hidden = a.rules, hidden_set()
+    chart = []
+    for s in entries(chart_years_for(r, years)).values():
+        s.update(mb_song(s["title"], s["artist"], s["year"]))
+        f, _ = musicdb.match(lib, None, s.get("mbid"), s["artist"], s["title"], any_copy=True)
+        c = cands.get(f) if f else None
+        if c is None:
+            key = f or "chart:" + musicdb.name_key(s["artist"], s["title"])
+            first = (s.get("first") or "")[:4]
+            c = cands.setdefault(key, {"key": key, "file": f, "release": int(first) if first.isdigit() else 0,
+                                       "chart_years": [], "plays": plays.get(f, 0) if f else 0, "liked": False,
+                                       "artist_mbid": None, "mbid": None, "tags": []})
+        # the chart's recording first: its listens break rank ties, and owning a copy must not move a rank
+        c.update(artist=s["artist"], title=s["title"], mbid=s.get("mbid") or c.get("mbid"),
+                 artist_mbid=c.get("artist_mbid") or s.get("artist_mbid"), tags=s.get("tags") or c.get("tags") or [],
+                 chart_years=sorted(set(c["chart_years"]) | set(s["years"])), peak=max(c.get("peak", 0), s["peak"]),
+                 points=c.get("points", 0) + s["points"], best=min(c.get("best", 101), s["best"]))
+        c["order"] = song_order(c)
+        c["hidden"] = hide_key(c["artist"], c["title"]) in hidden
+        if "billboard" in members:
+            members["billboard"].add(c["key"])
+        chart.append(c)
+    # ListenBrainz listens only break ties among ranked chart songs: asked for the rank's population only, the
+    # other chart rows (Billboard as a set or a year axis) use what the cache has
+    wanted = set(years or ())
+    ranked = r.rank == "billboard"
+    need = [c for c in chart if ranked and hits_rules.in_period(c, r.years_of, wanted)]
+    pop = lb_popularity([c.get("mbid") for c in need])
+    pop |= lb_popularity([c.get("mbid") for c in chart], cached_only=True)
+    for c in chart:
+        c["listens"] = pop.get(c.get("mbid"), 0)
+
+
+def listened_years(cands, lib):
+    """Each library song's plays per listening year, the weighted shuffle's own picks left out (they show what
+    the algorithm chose, not me): candidate["listened"] = Counter({year: plays})."""
+    stamps = {}
+    musicdb.counted(musicdb.db(), lib, stamps)
+    auto = musicdb.auto_starts()
+    for f, ts_list in stamps.items():
+        if f not in cands:
+            continue
+        picks = auto.get(f, [])
+        cands[f]["listened"] = collections.Counter(
+            int(t[:4]) for t in ts_list if not any(p - 120 <= musicdb.ts_epoch(t) <= p + 1800 for p in picks))
+
+
+def candidates(years, a, lib, plays, last):
+    """Every song the rules may select, {key: candidate}, and each set's members {set: {key}}. Library songs are
+    keyed by file, chart songs without a file "chart:<name key>", recommendations "rec:<mbid>"."""
+    r = a.rules
+    if getattr(a, "songs", None) is None:
+        a.songs = library_songs()
+    now = dt.datetime.now()
+    cands = {}
+    for f, s in a.songs.items():
+        idle = (now - dt.datetime.fromisoformat(last[f])).days if last.get(f) else 3650
+        c = cands[f] = dict(s, key=f, release=s["year"], chart_years=[], plays=plays.get(f, 0), idle_days=idle)
+        c["order"] = song_order(c)
+    members = {k: set() for k in r.sets}
+    if "likes" in members:
+        members["likes"] = {f for f, s in a.songs.items() if s["liked"]}
+    if "playlists" in members:
+        on, a.playlists_skipped = my_playlists()
+        a.playlists_used = len({n for names in on.values() for n in names})
+        for f, names in on.items():
+            if f in cands:  # a stream or a file MPD no longer has is not a song to select
+                cands[f]["reason"] = playlists_reason(names)
+                members["playlists"].add(f)
+    if r.years_of == "listened":
+        listened_years(cands, lib)
+    if r.rank == "billboard" or "billboard" in members or r.years_of == "chart":
+        chart_candidates(cands, members, years, a, lib, plays)
+    if "recommended" in members:
+        for c in recs_candidates(a, lib, plays):
+            cands[c["key"]] = c
+            members["recommended"].add(c["key"])
+    return cands, members
+
+
+def period_years(part, rules):
+    """'1985-1992' or '1987' -> years on the rules' axis: finished year-end charts for the chart year, the year in
+    progress included for listening and release years."""
+    if rules.years_of == "chart":
+        return list(range_years(part))
+    lo, _, hi = part.strip().partition("-")
+    return list(range(int(lo), int(hi or lo) + 1))
+
+
+def decade_axis_years(d, rules):
+    ys = decade_years(d)
+    return ys if rules.years_of == "chart" else list(range(ys[0] - ys[0] % 10, ys[0] - ys[0] % 10 + 10))
+
+
+def make_label(a, period):
+    """The result's name (status line, playlist name): an old source keeps its old label, any other combination
+    of sets is "Hits <period> <formula>"."""
+    r, legacy = a.rules, hits_rules.legacy_source(a.rules)
+    head = {"likes": "Likes ", "library": "Library ", "playlists": "My playlists ", "mine": "My charts ",
+            "recs": "Recommendations "}.get(legacy, "Hits ")
+    label = (f"{head}{period}" + (f" {a.genre}" if a.genre else "") + (f" {a.artist}" if a.artist else "")
+             + (f" top {a.top}%" if a.top_ranges else f" top{a.n}" if a.n else "")
+             + (" per decade" if a.decade == "all" and not a.years else "") + (" owned" if a.owned else "")
+             + (" by listens" if r.order == "listens" else ""))
+    if legacy == "mine":
+        return label + " · listening years, my plays (the shuffle's picks left out)"
+    if legacy in ("likes", "library", "playlists"):
+        return label + (" · by plays" if r.rank == "plays" else " · rediscover")
+    if legacy == "recs":
+        return label + " · LB Radio, similar to your most played artists"
+    if legacy == "billboard":
+        return label
+    return label + f" · {a.formula}"
 
 
 def show(a):
+    try:
+        a.rules = hits_rules.resolve(a.source, a.set, a.rank, a.years_of, a.sort)
+        a.top_ranges = hits_rules.top_for(a.rules, a.top)
+    except ValueError as err:
+        hits_rules.fail(err)
+    r = a.rules
+    if r.rank == "none" and a.top:
+        a.n = 0  # "1-100" with no rank: every row
     lib = musicdb.library()
-    plays, *_ = musicdb.counted(musicdb.db(), lib)
+    plays, last, *_ = musicdb.counted(musicdb.db(), lib)
     if a.years:
-        years = sorted({y for part in a.years.split(",") if part.strip()
-                        for y in range_years(part.strip())})
-        groups = [(a.years, years)]
-    elif a.source in ("likes", "recs", "library", "mine", "playlists") and not a.decade:
-        groups = [("all years", [])]
+        groups = [(a.years, sorted({y for part in a.years.split(",") if part.strip()
+                                    for y in period_years(part, r)}))]
+    elif a.decade:
+        groups = [(d, decade_axis_years(d, r)) for d in (DECADES if a.decade == "all" else [a.decade])]
+    elif r.rank == "billboard" and r.years_of == "chart":
+        sys.exit("give a decade or --years")
     else:
-        groups = [(d, decade_years(d)) for d in (DECADES if a.decade == "all" else [a.decade or sys.exit("give a decade or --years")])]
+        groups = [("all years", [])]
     period = a.years or a.decade or "all years"
     a.cohort_artists = {}
-    label = (f"Hits {period}" + (f" {a.genre}" if a.genre else "") + (f" {a.artist}" if a.artist else "")
-             + (f" top {a.top}%" if a.top else f" top{a.n}")
-             + (" per decade" if a.decade == "all" and not a.years else "") + (" owned" if a.owned else "")
-             + (" by listens" if a.rank == "listens" else ""))
-    rows = []
-    if a.source == "mine":
-        # listening years, the current one included (partial): not capped like the finished year-end charts
-        def listening(part):
-            lo, _, hi = part.strip().partition("-")
-            return range(int(lo), int(hi or lo) + 1)
-        if a.years:
-            groups = [(a.years, sorted({y for p in a.years.split(",") if p.strip() for y in listening(p)}))]
-        elif a.decade and a.decade != "all":
-            d = decade_years(a.decade)
-            groups = [(a.decade, list(range(d[0] - d[0] % 10, d[0] - d[0] % 10 + 10)))]
-        label = label.replace("Hits ", "My charts ", 1) + " · listening years, my plays (the shuffle's picks left out)"
-    if a.source in ("likes", "library", "playlists"):
-        plays_last = musicdb.counted(musicdb.db(), lib)
-        plays, last = plays_last[0], plays_last[1]
-        name = {"likes": "Likes ", "library": "Library ", "playlists": "My playlists "}[a.source]
-        label = label.replace("Hits ", name, 1) + (" · by plays" if a.sort == "plays" else " · rediscover")
-    if a.source == "playlists":
-        on, a.playlists_skipped = my_playlists()
-        a.playlists_used = len({n for names in on.values() for n in names})
-        reasons = {f: playlists_reason(names) for f, names in on.items()}
-    if a.source == "recs":
-        label = label.replace("Hits ", "Recommendations ", 1) + " · LB Radio, similar to your most played artists"
+    a.formula = hits_rules.formula(r, period=a.years or a.decade, top=a.top_ranges, genre=a.genre,
+                                   artist=a.artist, owned=a.owned)
+    label = make_label(a, period)
     print(f"# {label}   ✓ = in library, plays = your play count")
+    rows, a.candidates, a.cohort, a.mine_plays = [], 0, 0, 0
+    genre_ok, artist_ok = genre_filter(a.genre), artist_filter(a.artist)
     for d, years in groups:
-        part = (likes_rows(years, a, lib, plays, last) if a.source == "likes"
-                else likes_rows(years, a, lib, plays, last, only_liked=False) if a.source == "library"
-                else likes_rows(years, a, lib, plays, last, only_liked=False, only=reasons) if a.source == "playlists"
-                else mine_rows(years, a, lib) if a.source == "mine"
-                else recs_rows(a, lib, plays) if a.source == "recs" else ranked(years, a, lib))
-        if a.source != "billboard":  # no cohort beyond the rows themselves
-            for k, (name, n) in count_artists(part).items():
-                a.cohort_artists.setdefault(k, [name, 0])[1] += n
-        if a.artist:  # after the Top % cut: "Queen's songs in the 1980s top 10%", ranks keep their meaning
-            ok = artist_filter(a.artist)
-            part = [s for s in part if ok(s["artist"])]
+        cands, members = candidates(years, a, lib, plays, last)
+        part, info = hits_rules.select(
+            cands, members, r, wanted=years, top=a.top_ranges, owned=a.owned, show_hidden=a.show_hidden, n=a.n,
+            artist_ok=(lambda c: artist_ok(c["artist"])) if a.artist else (lambda c: True),
+            genre_ok=(lambda c: genre_ok(genres(c))) if a.genre else (lambda c: True))
+        a.candidates += info["candidates"]
+        a.cohort += info["cohort"]
+        if r.rank == "plays" and r.years_of == "listened":
+            a.mine_plays += sum(hits_rules.score(cands[k], r, set(years)) for k in cands if cands[k].get("listened"))
+        # the artist picker lists the artists of the whole selection before the Top % cut
+        for k, (name, n) in count_artists(info["pool"]).items():
+            a.cohort_artists.setdefault(k, [name, 0])[1] += n
         if len(groups) > 1:
-            print(f"\n## {d} (Billboard year-end {coverage(d)}): {sum(1 for s in part if s['file'])}/{len(part)} in library")
+            print(f"\n## {d}: {sum(1 for s in part if s['file'])}/{len(part)} in library")
         print_rows(part, plays, a)
         rows += part
     have = [s for s in rows if s["file"]]
-    print(f"\n{len(have)}/{len(rows)} in library")
+    a.summary = hits_rules.summary(a.formula, len(rows), a.candidates)
+    print(f"\n{len(have)}/{len(rows)} in library · {a.summary}")
     if a.json:
         write_json(a, label, rows, plays)
     if a.playlist:
@@ -761,7 +773,8 @@ def show(a):
         for s in missing:
             q = f"ytsearch1:{main_artist(s['artist'])} - {s['title']} official audio"
             print(f"\n==> {s['artist']} - {s['title']}")
-            subprocess.run([sys.executable, "-m", "rormpc_tools.yt_mp3_mb", "--yes", "-d", f"Hits/{s['year'] // 10 * 10}s", q, "--", "--no-playlist"])
+            year = min(s["chart_years"], default=s.get("release") or 0)
+            subprocess.run([sys.executable, "-m", "rormpc_tools.yt_mp3_mb", "--yes", "-d", f"Hits/{year // 10 * 10}s", q, "--", "--no-playlist"])
         if missing and a.playlist:
             print("re-run with --playlist after the MPD update to include the new files")
 
@@ -813,27 +826,61 @@ def hide_cmd(argv):
     print(f"{argv[0]}: {a.artist} - {a.title}")
 
 
+def row_years(s):
+    """The years a row lists (the details' "Year-end charts"): its chart years, else its release year."""
+    return s.get("chart_years") or ([s["release"]] if s.get("release") else [])
+
+
+def row_year(s, rules):
+    """The Year column: the first chart year when Years of is the chart year, else the release year."""
+    if rules.years_of == "chart":
+        return min(s.get("chart_years") or [s.get("release") or 0])
+    return s.get("release") or min(s.get("chart_years") or [0])
+
+
+def rank_note(a):
+    """The details line under a row's rank: what the rank means for these rules."""
+    r = a.rules
+    if r.rank == "billboard":
+        note = "best year-end chart position within the chosen years" + (", by ListenBrainz listens" if r.order else "")
+    elif r.rank == "plays" and r.years_of == "listened":
+        note = (f"rank by my plays in these listening years ({a.mine_plays} plays"
+                + (": thin data, a ranking of few plays" if a.mine_plays < MINE_THIN else "") + ")")
+    elif r.rank == "plays":
+        note = "rank by your plays among all library songs"
+    elif r.rank == "rediscover":
+        note = "library songs often played, not lately"
+    elif r.sets.get("recommended", 0) > 0:
+        note = "not ranked; recommendations: more of your most played artists point to it; then they take turns"
+    else:
+        note = "not ranked (Rank by none), so no Top %"
+    if r.sets.get("playlists", 0) > 0:
+        note += "; " + playlists_note(a)
+    return note
+
+
 def write_json(a, label, rows, plays):
-    """Versioned result file for rormpc's Hits pane, written atomically (the pane may read it any time)."""
+    """Versioned result file for rormpc's Hits pane, written atomically (the pane may read it any time). Version
+    1 gained fields only: "rules", "formula", "summary", "counts", args.sets/years_of, rows' "ranked" and "sets"
+    (rormpc's hits.rs parses a copy of this shape in its tests; tests/test_rormpc_contract.py checks this side)."""
+    r = a.rules
+    owned = sum(1 for s in rows if s["file"])
     out = {"version": 1, "generated_at": dt.datetime.now().isoformat(timespec="seconds"), "label": label,
            "artists": [{"name": name, "songs": n} for name, n in
                        sorted(a.cohort_artists.values(), key=lambda x: (-x[1], fold(x[0])))],
            "args": {"period": a.years or a.decade, "top": a.top, "genre": a.genre, "artist": a.artist,
-                    "owned": a.owned, "rank": a.rank,
-                    "show_hidden": a.show_hidden, "source": a.source, "sort": a.sort},
-           "rank_note": ("more of your most played artists point to it; then they take turns" if a.source == "recs"
-                         else (f"rank by my plays in these listening years ({getattr(a, 'mine_plays', 0)} plays"
-                               + (": thin data, a ranking of few plays" if getattr(a, "mine_plays", 0) < MINE_THIN else "")
-                               + ")") if a.source == "mine"
-                         else playlists_note(a) if a.source == "playlists"
-                         else "rank by your plays among all library songs" if a.source == "library" and a.sort == "plays"
-                         else "library songs often played, not lately" if a.source == "library"
-                         else "rank by your plays among liked songs" if a.source == "likes" and a.sort == "plays"
-                         else "liked, often played, not lately" if a.source == "likes"
-                         else "best year-end chart position within the chosen years and genres"),
-           "rows": [{"rank": s["rank"], "pct": s["pct"], "cohort": s["cohort"], "artist": s["artist"], "title": s["title"],
-                     "year": min(s["years"], default=0), "years": s["years"], "points": s["points"], "peak": s["peak"],
-                     "listens": s.get("listens", 0),
+                    "owned": a.owned, "rank": r.rank, "years_of": r.years_of,
+                    "sets": [("+" if v > 0 else "-") + k for k, v in r.sets.items()],
+                    "show_hidden": a.show_hidden, "source": r.source, "sort": a.sort},
+           "rules": hits_rules.as_dict(r) | {"period": a.years or a.decade, "top": a.top if a.top_ranges else None,
+                                              "genre": a.genre, "artist": a.artist, "owned": a.owned},
+           "formula": a.formula, "summary": a.summary,
+           "counts": {"selected": len(rows), "owned": owned, "candidates": a.candidates, "cohort": a.cohort},
+           "rank_note": rank_note(a),
+           "rows": [{"rank": s["rank"], "pct": s["pct"], "cohort": s["cohort"], "ranked": s["ranked"],
+                     "artist": s["artist"], "title": s["title"], "year": row_year(s, r), "years": row_years(s),
+                     "points": s.get("points", s.get("plays", 0)), "peak": s.get("peak", s.get("plays", 0)),
+                     "listens": s.get("listens", 0), "sets": s.get("sets", []),
                      "genres": genres(s)[:5], "mbid": s.get("mbid"), "file": s["file"], "hidden": s.get("hidden", False),
                      "plays": plays.get(s["file"], 0) if s["file"] else 0, "reason": s.get("reason")} for s in rows]}
     path = pathlib.Path(a.json).expanduser()
@@ -845,22 +892,22 @@ def write_json(a, label, rows, plays):
 
 
 def playlists_note(a):
-    """The details line of source "playlists": the ranking and which playlists were left out as generated."""
+    """The details line of set "playlists": how many playlists, and which were left out as generated."""
     used = getattr(a, "playlists_used", 0)
-    head = (f"rank by your plays among the songs of your {used} playlist{'s' if used != 1 else ''}"
-            if a.sort == "plays" else f"songs of your {used} playlists often played, not lately")
+    head = f"the songs of your {used} playlist{'s' if used != 1 else ''}"
     left = sorted({next(p for p in GENERATED_PLAYLISTS if n.startswith(p)).strip()
                    for n in getattr(a, "playlists_skipped", [])})
     return head + (f"; generated ones left out: {', '.join(left)}" if left else "")
 
 
 def print_rows(rows, plays, a):
-    for i, s in enumerate(rows, 1):
+    for s in rows:
         have = "✓" if s["file"] else " "
         k = plays.get(s["file"], 0) if s["file"] else 0
-        score = f"{s['listens']:>9,}" if a.rank == "listens" else f"{s['peak']:>4}"
+        score = f"{s.get('listens', 0):>9,}" if a.rules.order == "listens" else f"{s.get('peak', s.get('plays', 0)):>4}"
         g = ", ".join(genres(s)[:3])
-        print(f"{s.get('rank', i):4d}.{'h' if s.get('hidden') else ' '}{have} {k or '':>4} {score}  {s['artist']} - {s['title']}  ({min(s['years'], default='?')}; {g})"
+        rank = f"{s['rank']:4d}." if s["ranked"] else "   —."
+        print(f"{rank}{'h' if s.get('hidden') else ' '}{have} {k or '':>4} {score}  {s['artist']} - {s['title']}  ({min(row_years(s), default='?')}; {g})"
               + (f"  [{s['reason']}]" if s.get("reason") else ""))
 
 
@@ -919,30 +966,46 @@ def main():
         return export_seed()
     if len(sys.argv) > 1 and sys.argv[1] == "compact":
         return compact_cache()
+    # "--set -likes": argparse would read "-likes" as an option, so it becomes "--set=-likes"
+    argv, rest = [], iter(sys.argv[1:])
+    for x in rest:
+        nxt = next(rest, None) if x == "--set" else None
+        argv += [f"--set={nxt}"] if nxt is not None else [x]
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("decade", nargs="?", help='e.g. 1980s, 80s, 2010s, or "all" for top N of every decade')
     ap.add_argument("--years", help="year ranges instead of a decade, e.g. 1985-1992 or 1970-1979,1990-1999 (one pooled ranking)")
     ap.add_argument("--top", help='percent ranges of the ranking, e.g. "1-10" or "11-20,21-50" (instead of -n)')
     ap.add_argument("--json", metavar="PATH", help="also write the result as JSON (for rormpc's Hits pane)")
     ap.add_argument("--show-hidden", action="store_true", help="include songs hidden with `hits hide` (marked)")
-    ap.add_argument("--source", choices=["billboard", "likes", "recs", "library", "mine", "playlists"], default="billboard",
-                    help="billboard: US year-end charts; likes: your liked songs (rmpc like sticker); "
-                         "recs: songs of artists similar to your most played ones (ListenBrainz Radio); "
-                         "library: every library song by your plays; "
-                         "mine: your own charts, by your plays in the chosen listening years; "
-                         "playlists: the songs of all your MPD playlists by your plays, except the generated ones "
-                         "(hits --playlist's, LB …, Folder …, Skipped, Not finished)")
+    ap.add_argument("--set", action="append", metavar="±KIND",
+                    help="a set chip, repeatable: +KIND includes, -KIND excludes; KIND: billboard (US year-end "
+                         "charts), likes (rmpc like sticker), playlists (all your MPD playlists except the generated "
+                         "ones: hits --playlist's, LB …, Folder …, Skipped, Not finished), recommended (songs of artists "
+                         "similar to your most played ones, ListenBrainz Radio). Selection = (union of + sets, or the "
+                         "whole library when none is +) - (union of - sets) ∩ period ∩ genres ∩ artists ∩ Top %% ∩ owned")
+    ap.add_argument("--rank", choices=["billboard", "plays", "rediscover", "none", "chart", "listens"],
+                    help="billboard: best year-end position; plays: your plays; rediscover: often played, not lately; "
+                         "none: no ranking, no Top %%. Top %% is cut in the rank's own population (the chart songs or "
+                         "the library songs of the period), before sets, genres and artists. Default: billboard when "
+                         "+billboard, none for +recommended alone, else plays. (chart = billboard; listens = the "
+                         "Billboard cohort by ListenBrainz listens)")
+    ap.add_argument("--years-of", choices=["release", "chart", "listened"],
+                    help="which years the period means; default follows --rank: billboard -> chart, plays -> "
+                         "listened, else release")
+    ap.add_argument("--source", choices=["billboard", "likes", "recs", "library", "mine", "playlists"],
+                    help="the old shorthand: billboard = --set +billboard --rank billboard --years-of chart; "
+                         "likes/library/playlists = --set +likes/(none)/+playlists --rank <--sort> --years-of release; "
+                         "mine = --rank plays --years-of listened; recs = --set +recommended --rank none")
     ap.add_argument("--sort", choices=["plays", "rediscover"], default="plays",
-                    help="order for --source likes, library and playlists")
-    ap.add_argument("-n", type=int, default=100, help="how many (10/100/1000)")
+                    help="the rank for --source likes, library and playlists")
+    ap.add_argument("-n", type=int, default=100, help="how many without --top (10/100/1000; 0 = all)")
     ap.add_argument("-g", "--genre", default="", help='e.g. "rock -country" or "hip hop, r&b"')
     ap.add_argument("--artist", default="", help='e.g. "+Queen -Madonna" or "Toto, Queen": artists of the credit '
                     '(feat., &, ...), case and diacritics ignored; applied after the Top %% cut')
-    ap.add_argument("--rank", choices=["chart", "listens"], default="chart")
     ap.add_argument("--owned", action="store_true", help="top N among the songs you have, not the overall top N")
     ap.add_argument("--playlist", action="store_true", help="write an MPD playlist of the songs you have")
     ap.add_argument("--download", action="store_true", help="download missing songs with yt-mp3-mb")
-    show(ap.parse_args())
+    show(ap.parse_args(argv))
 
 
 if __name__ == "__main__":
