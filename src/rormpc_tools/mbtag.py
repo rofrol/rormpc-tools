@@ -327,6 +327,7 @@ def decide(d):
 def from_recording(d, rec):
     ac = rec.get("artist-credit", [])
     return {"mbid": rec["id"], "title": rec["title"],  # MB may redirect merged recordings -> returned id
+            "video": bool(rec.get("video")),  # MB marks music videos; their first release is often a video DVD
             "artist": "".join(a["name"] + a.get("joinphrase", "") for a in ac),
             "artist_mbids": [a["artist"]["id"] for a in ac],
             "mb_length": round((rec.get("length") or 0) / 1000),
@@ -382,12 +383,13 @@ def resolve(d):
             if rec:
                 row.update(from_recording(d, rec))
     video = re.compile(r"\s*[\(\[][^\(\[]*\b(clip|video|videoclip|MV)\b[^\)\]]*[\)\]]\s*$", re.I)
-    if row["mbid"] and video.search(row["title"]):
-        # MB "video" recording (e.g. from the YouTube URL rel) -> prefer the audio recording of the same song
+    if row["mbid"] and (row.get("video") or video.search(row["title"])):
+        # MB "video" recording (e.g. from the YouTube URL rel; flagged, or "(video)" in the title) -> prefer the
+        # audio recording of the same song: a video's first release is often a later video compilation
         base = video.sub("", row["title"])
         for alt in row["alternatives"]:
             rec = mb_recording(alt["mbid"])
-            if rec and not video.search(rec["title"]) and sim(base, rec["title"]) >= 0.9:
+            if rec and not rec.get("video") and not video.search(rec["title"]) and sim(base, rec["title"]) >= 0.9:
                 alt_row = from_recording(d, rec)
                 if sim(alt_row["artist"], row["artist"]) >= 0.8:
                     row.update(alt_row)
