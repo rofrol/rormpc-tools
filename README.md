@@ -14,6 +14,38 @@ They work from the shell too; each one's usage is in its `--help`.
 | `liveplaylist` | a public YouTube playlist as a "live" MPD playlist (rormpc's Live playlists pane): `add URL`, `check` for new tracks, `accept` / `reject` them, `download`, `list`; every command takes `--json` |
 | `yt-playlist` | your YouTube playlists through the YouTube Data API (OAuth), for removing deleted songs |
 
+### hits: sets, ranks, exceptions and smart lists
+
+Selection = (union of `+` sets, or the whole library when no set is `+`) − (union of `-` sets) ∩ period ∩ genres
+∩ artists ∩ Top % ∩ owned. Top % is cut in the rank's own population (the chart songs or the library songs of the
+period), before sets, genres and artists, so a song's rank never depends on them.
+
+- `--set ±KIND`, repeatable: `billboard` (US year-end charts), `likes` (rmpc's like sticker), `playlists` (your MPD
+  playlists except the generated ones), `recommended` (artists similar to your most played, ListenBrainz Radio).
+  Named sets, one per `--set`: `tag:NAME`, `playlist:NAME`, `live:ID`, `list:ID|NAME`; `hits sets` lists them with
+  their sizes. A missing one is an error, never an empty set.
+- `--rank billboard|plays|rediscover|none`: best year-end position; your plays; often played, not lately; no
+  ranking and no Top %. My plays and rediscover leave out the weighted shuffle's own picks. Default: `billboard`
+  with `+billboard`, `none` for `+recommended` alone, else `plays`.
+- `--years-of release|chart|listened`: which years the period means; the default follows `--rank` (billboard ->
+  chart, plays -> listened, else release). `--source` is the old shorthand, mapped onto these three.
+- `hits except pin|exclude|remove --scope library|set:KIND[:NAME]|list:ID --file PATH` (or `--id`,
+  `--chart-key`): a pin ✚ keeps an owned song in whatever the filters say (unranked, after the ranked rows), an
+  exclusion ⊘ takes it out and beats any pin. A set scope applies only while that set is `+`, a list scope only
+  while that smart list is open. `hits exceptions` lists them, `hits hide` included; `--show-excluded` keeps the
+  excluded songs in the result, marked ⊘.
+- `hits lists [create|update|rename|duplicate|delete|export]`: smart lists, the filter options saved under a name
+  (`<data_dir>/smartlists.jsonl`). `export` (also hourly in `musicdb update`) writes each as the MPD playlist
+  "Smart NAME", a snapshot never read back as rules. `--list NAME` runs one with its exceptions, `--rules FILE` runs
+  a rules object from a file.
+
+```sh
+hits 1980s --set +billboard --set +likes --set -playlists --top 1-10   # (Billboard ∪ Likes) − Playlists
+hits --years 1990-1999 --rank plays --years-of release --top 1-10     # my most played songs released then
+hits --set +likes --rank rediscover
+hits sets; hits exceptions; hits lists                                 # read only
+```
+
 ## Install
 
     uv tool install 'rormpc-tools @ git+https://github.com/rofrol/rormpc-tools@v0.1.6'
