@@ -24,15 +24,28 @@ _last = {}
 SHAZAM_INTERVAL = 2  # external rate limit: the unofficial Shazam API throttles bursts
 
 
-def lb_token():
-    """ListenBrainz token (optional, only improves matching): $LISTENBRAINZ_TOKEN or the listenbrainz-mpd config."""
-    if os.environ.get("LISTENBRAINZ_TOKEN"):
-        return os.environ["LISTENBRAINZ_TOKEN"]
+LB_API = "https://api.listenbrainz.org"  # listenbrainz-mpd's default api_url
+
+
+def lb_config(key):
+    """A non-empty string setting (token, api_url) from the first listenbrainz-mpd config that has it."""
     for cfg in LB_CONFIGS:
-        m = re.search(r'^token\s*=\s*"([^"]+)"', cfg.read_text(), re.M) if cfg.exists() else None
+        m = re.search(rf'^{key}\s*=\s*"([^"]+)"', cfg.read_text(), re.M) if cfg.exists() else None
         if m:
             return m.group(1)
     return None
+
+
+def lb_token():
+    """ListenBrainz token (optional, only improves matching): $LISTENBRAINZ_TOKEN or the listenbrainz-mpd config."""
+    return os.environ.get("LISTENBRAINZ_TOKEN") or lb_config("token")
+
+
+def lb_api(path):
+    """URL of the ListenBrainz API `path` ("/1/..."), on the server the scrobbler sends listens to: its api_url
+    with trailing slashes dropped and the path appended, exactly as listenbrainz-mpd builds its URLs (so an api_url
+    ending in /1 gives /1/1/ there and here), else the public ListenBrainz."""
+    return (lb_config("api_url") or LB_API).rstrip("/") + path
 
 
 def lb_user():
@@ -42,7 +55,7 @@ def lb_user():
     token = lb_token()
     if not token:
         sys.exit(f"no ListenBrainz user: set lb_user in {settings.CONFIG_FILE} or a token in the listenbrainz-mpd config")
-    r = http("https://api.listenbrainz.org/1/validate-token", headers={"Authorization": "Token " + token}, strict=True)
+    r = http(lb_api("/1/validate-token"), headers={"Authorization": "Token " + token}, strict=True)
     if not r.get("valid"):
         sys.exit(f"ListenBrainz token is not valid ({r.get('message', 'no reason given')}): fix it in the "
                  "listenbrainz-mpd config, or set lb_user")
@@ -193,7 +206,7 @@ def shazam(path, key=None):
 def lb_lookup(artist, title, token):
     if not token:
         return None
-    r = http("https://api.listenbrainz.org/1/metadata/lookup/?" + urllib.parse.urlencode({"artist_name": artist, "recording_name": title}),
+    r = http(lb_api("/1/metadata/lookup/?") + urllib.parse.urlencode({"artist_name": artist, "recording_name": title}),
              host_interval=0.3, headers={"Authorization": "Token " + token})
     return r if r and r.get("recording_mbid") else None
 

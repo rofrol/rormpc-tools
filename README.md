@@ -26,7 +26,10 @@ Needs MPD with `sticker_file` set (stickers hold the counts), `mpc`; `yt-mp3-mb`
 `fpcalc` (AcoustID) and `rsgain` (ReplayGain tags for MPD's `replaygain "track"`) are optional. When neither the video's MusicBrainz link nor AcoustID knows a song, `yt-mp3-mb`
 asks Shazam through `shazamio` (an unofficial API: answers are cached, a Shazam-only match is always confirmed by
 you, never written on its own). ListenBrainz features read the token from the
-[listenbrainz-mpd](https://codeberg.org/elomatreb/listenbrainz-mpd) config (or `$LISTENBRAINZ_TOKEN`).
+[listenbrainz-mpd](https://codeberg.org/elomatreb/listenbrainz-mpd) config (or `$LISTENBRAINZ_TOKEN`), and the calls
+that concern your account (token check, listens, likes, imports, deletions, recommendation playlists) go to that
+config's `api_url`, like the scrobbler's, else to the public ListenBrainz. Anonymous lookups in `hits` (popularity,
+Radio) always use the public ListenBrainz.
 
 ### YouTube playlists (optional)
 

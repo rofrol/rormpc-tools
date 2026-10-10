@@ -14,7 +14,10 @@ os.environ.update({
 
 import pytest  # noqa: E402
 
-from rormpc_tools import musicdb  # noqa: E402
+from rormpc_tools import mbtag, musicdb  # noqa: E402
+
+# the macOS listenbrainz-mpd config is not under XDG_CONFIG_HOME: the user's token and api_url must not leak in
+mbtag.LB_CONFIGS = [_root / "config" / "listenbrainz-mpd" / "config.toml"]
 
 
 class FakeMPD:

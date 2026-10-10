@@ -258,7 +258,7 @@ def import_lb(_a):
     rows, max_ts = [], None
     while True:
         # small pages: with years of imported history LB times out on count=1000
-        u = f"https://api.listenbrainz.org/1/user/{user}/listens?count=100" + (f"&max_ts={max_ts}" if max_ts else "")
+        u = mbtag.lb_api(f"/1/user/{user}/listens?count=100") + (f"&max_ts={max_ts}" if max_ts else "")
         page = mbtag.http(u, host_interval=0.5, strict=True)
         ls = (page or {}).get("payload", {}).get("listens")
         if not isinstance(ls, list):
@@ -725,7 +725,7 @@ def push_feedback(c, scores):
     todo = {mbid: s for mbid, s in scores.items() if told.get(mbid, 0 if s == 0 else None) != s}
     token = mbtag.lb_token() if todo else None
     for mbid, score in todo.items():
-        req = urllib.request.Request("https://api.listenbrainz.org/1/feedback/recording-feedback", method="POST",
+        req = urllib.request.Request(mbtag.lb_api("/1/feedback/recording-feedback"), method="POST",
                                      data=json.dumps({"recording_mbid": mbid, "score": score}).encode(),
                                      headers={"Authorization": "Token " + token, "Content-Type": "application/json",
                                               "User-Agent": mbtag.UA})
@@ -843,7 +843,7 @@ def lb_import_spotify(a):
         print(json.dumps(listens[:2], ensure_ascii=False, indent=1)); return
     token = mbtag.lb_token()
     for i in range(0, len(listens), 500):
-        req = urllib.request.Request("https://api.listenbrainz.org/1/submit-listens", method="POST",
+        req = urllib.request.Request(mbtag.lb_api("/1/submit-listens"), method="POST",
                                      data=json.dumps({"listen_type": "import", "payload": listens[i:i + 500]}).encode(),
                                      headers={"Authorization": "Token " + token, "Content-Type": "application/json",
                                               "User-Agent": mbtag.UA})
@@ -856,7 +856,7 @@ def lb_playlists(a):
     """Newest ListenBrainz recommendation playlist of each kind (Daily/Weekly Jams, Weekly Exploration, ...)
     -> MPD playlist "LB <kind>" of the tracks in the library, plus the missing ones (optionally downloaded)."""
     user = a.user or mbtag.lb_user()
-    r = mbtag.http(f"https://api.listenbrainz.org/1/user/{user}/playlists/createdfor?count=50", host_interval=0.5, strict=True)
+    r = mbtag.http(mbtag.lb_api(f"/1/user/{user}/playlists/createdfor?count=50"), host_interval=0.5, strict=True)
     newest = {}
     for p in r.get("playlists", []):
         pl = p["playlist"]
@@ -870,7 +870,7 @@ def lb_playlists(a):
         print(f"ListenBrainz has no recommendation playlists for {user} yet"); return
     lib = library()
     for kind, pl in sorted(newest.items()):
-        full = mbtag.http(f"https://api.listenbrainz.org/1/playlist/{pl['identifier'].rsplit('/', 1)[-1]}",
+        full = mbtag.http(mbtag.lb_api(f"/1/playlist/{pl['identifier'].rsplit('/', 1)[-1]}"),
                           host_interval=0.5, strict=True)["playlist"]
         have, missing = [], []
         for t in full.get("track", []):
@@ -1051,7 +1051,7 @@ def finish(r):
                     msid = json.loads(e["extra"])["msid"]
                     if f"{e['ts']} {msid}" in gone:
                         continue
-                    req = urllib.request.Request("https://api.listenbrainz.org/1/delete-listen", method="POST",
+                    req = urllib.request.Request(mbtag.lb_api("/1/delete-listen"), method="POST",
                                                  data=json.dumps({"listened_at": int(epoch_of(e["ts"])),
                                                                   "recording_msid": msid}).encode(),
                                                  headers={"Authorization": "Token " + token, "Content-Type": "application/json",
