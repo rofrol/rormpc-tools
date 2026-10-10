@@ -73,7 +73,7 @@ def sub():
 
 
 def m3u(ns):
-    f = ns.playlists / "Omarchy Radio.m3u"
+    f = ns.playlists / "radio.omarchy.org.m3u"
     return f.read_text().splitlines() if f.exists() else None
 
 
@@ -104,7 +104,7 @@ def test_add_lists_the_station_as_pending_and_downloads_nothing(radio, capsys):
     code, out = call(capsys, "add", "https://radio.omarchy.org/")
     assert code == 0 and out["added"] and out["check"]["new"] == FILES
     s = sub()
-    assert s["kind"] == "omarchy" and s["title"] == "Omarchy Radio" and s["playlist"] == "Omarchy Radio"
+    assert s["kind"] == "omarchy" and s["title"] == "Omarchy Radio" and s["playlist"] == "radio.omarchy.org"
     assert s["dir"] == DIR and s["etag"] == '"v1"'
     assert {it["decision"] for it in s["items"].values()} == {"pending"}
     assert s["items"][FILES[3]]["explicit"] and s["items"][FILES[1]]["artist"] == "Michel Krapf"

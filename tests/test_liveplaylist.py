@@ -118,6 +118,35 @@ def test_add_picks_a_free_playlist_name(live, capsys):
     assert (live.playlists / "Test list.m3u").read_text() == "someone/else.mp3\n"
 
 
+def test_rename_moves_the_m3u_and_records_the_name(live, capsys):
+    call(capsys, "add", URL)
+    call(capsys, "accept", SID, A)
+    assert m3u(live) and (live.playlists / "Test list.m3u").exists()
+    code, out = call(capsys, "rename", SID, "My list")
+    assert code == 0 and out == {"id": SID, "old": "Test list", "playlist": "My list", "renamed": True}
+    assert sub()["playlist"] == "My list" and not (live.playlists / "Test list.m3u").exists()
+    assert (live.playlists / "My list.m3u").read_text().splitlines() == [sub()["items"][A]["path"]]
+    code, out = call(capsys, "rename", SID, "My list")  # again: nothing to do
+    assert code == 0 and not out["renamed"]
+
+
+def test_rename_writes_a_missing_m3u(live, capsys):
+    call(capsys, "add", URL)
+    (live.playlists / "Test list.m3u").unlink()
+    code, _ = call(capsys, "rename", SID, "My list")
+    assert code == 0 and (live.playlists / "My list.m3u").read_text() == ""
+
+
+def test_rename_never_replaces_a_playlist(live, capsys):
+    call(capsys, "add", URL)
+    (live.playlists / "Taken.m3u").write_text("someone/else.mp3\n")
+    for name in ("Taken", "a/b", " ", ".hidden"):
+        code, out = call(capsys, "rename", SID, name)
+        assert code == 1 and out["error"]
+    assert (live.playlists / "Taken.m3u").read_text() == "someone/else.mp3\n"
+    assert sub()["playlist"] == "Test list" and (live.playlists / "Test list.m3u").exists()
+
+
 def test_add_of_an_unlistable_playlist_subscribes_nothing(live, capsys):
     live.listing = RuntimeError("ERROR: [youtube:tab] The playlist does not exist")
     code, out = call(capsys, "add", URL)

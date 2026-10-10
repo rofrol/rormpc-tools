@@ -7,6 +7,7 @@ tracks when you ask.
   liveplaylist reject ID KEY ...                   # never download these items (rejects are durable)
   liveplaylist download [ID ...]                   # one worker (a second one exits) empties the queue, resumable
   liveplaylist list [ID ...]                       # subscriptions and their items
+  liveplaylist rename ID NAME                      # move its MPD playlist to NAME.m3u
 
 Every command takes --json: one JSON object on stdout, messages on stderr. ID is the subscription id that `add`
 prints (yt-<playlist id>, omarchy-radio), KEY an item's key (a YouTube video id; Omarchy Radio: the track's file
@@ -19,7 +20,8 @@ Sources, checked by hand, nothing on a timer:
   file (ETag); an accepted track's MP3 is downloaded as it is and tagged with the playlist's own artist, title and
   album ("publisher metadata": nothing to match). An invalid or duplicate entry is skipped and makes the listing
   partial. A deleted song is blocked by its library path before a download and by its audio hash after it; a
-  download whose audio a library file already has is referenced, not copied. The rest below is about YouTube.
+  download whose audio a library file already has is referenced, not copied. Its MPD playlist is named after the
+  host (radio.omarchy.org) unless --name says otherwise. The rest below is about YouTube.
 
 Each item has a decision (pending / accepted / rejected) and, separately, a job state (queued / downloading /
 needs_match / ready / failed / blocked):
@@ -34,7 +36,7 @@ needs_match / ready / failed / blocked):
 - A video deleted from the library with `musicdb delete` is never downloaded again (deleted.py): `check` marks it
   ("deleted": {id, deleted_at, file}), the worker sets job "blocked" instead of downloading it, and a download
   identified as a deleted recording is dropped (blocked too). `musicdb deletions allow ID`, then accept it again.
-- The MPD playlist (<name>.m3u in MPD's playlist directory, written atomically) holds the accepted, ready, still
+- The MPD playlist (<name>.m3u in MPD's playlist directory, written atomically; `rename` moves it) holds the accepted, ready, still
   listed items in the playlist's order; file names carry no position.
 - Nothing deletes a file: a rejected or vanished item leaves the playlist, its file stays. A failed or partial
   listing changes nothing but the last-check error; an item that comes back is active again with its old decision.
@@ -177,9 +179,12 @@ def m3u_path(name):
     return PLAYLISTS / f"{name}.m3u"
 
 
+BAD_NAME = re.compile(r'[/\\\x00-\x1f]')
+
+
 def free_name(title, sid):
     """An MPD playlist name no other playlist uses: the title, else "title (2)", ..."""
-    base = re.sub(r'[/\\\x00-\x1f]', " ", title).strip() or sid
+    base = BAD_NAME.sub(" ", title).strip() or sid
     taken = {load(s)["playlist"] for s in all_ids() if s != sid}
     name, n = base, 1
     while name in taken or m3u_path(name).exists():
@@ -384,7 +389,7 @@ def cmd_add(a):
             return {"id": sid, "added": False, "check": check_one(sid)}
         rel = a.dir or f"LivePlaylists/{yt_mp3_mb.safe(title, 80)}--{lid}"
         sub = {"schema": SCHEMA, "id": sid, "kind": sub_kind, "url": url, "title": title,
-               "playlist": a.name or free_name(title, sid), "dir": rel, "added_at": now(), "items": {}}
+               "playlist": a.name or free_name(OMARCHY_HOST if sub_kind == "omarchy" else title, sid), "dir": rel, "added_at": now(), "items": {}}
         if sub_kind == "youtube":
             sub["list_id"] = lid
         if a.name and m3u_path(a.name).exists():
@@ -408,6 +413,35 @@ def cmd_check(a):
                           if r["ok"] else f"check failed, nothing changed: {r['error']}"))
         results.append(r)
     return {"checks": results}
+
+
+def cmd_rename(a):
+    """Give a subscription's MPD playlist another name: the .m3u moves (one rename in MPD's playlist dir), then the
+    subscription records it. Another subscription's name or an existing playlist file is refused, never replaced."""
+    name = a.name.strip()
+    if not name or BAD_NAME.search(name) or name.startswith("."):
+        raise ValueError(f"not an MPD playlist name: {a.name!r}")
+    with locked():
+        sub = load(a.id)
+        old = sub["playlist"]
+        if name == old:
+            say(f"{a.id}: already {name!r}")
+            return {"id": a.id, "old": old, "playlist": name, "renamed": False}
+        if any(load(s)["playlist"] == name for s in all_ids() if s != a.id) or m3u_path(name).exists():
+            raise ValueError(f"an MPD playlist named {name!r} exists already: choose another name")
+        moved = m3u_path(old).exists()
+        if moved:
+            os.rename(m3u_path(old), m3u_path(name))
+        sub["playlist"] = name
+        try:
+            save(sub)
+        except BaseException:
+            if moved:
+                os.rename(m3u_path(name), m3u_path(old))
+            raise
+        write_m3u(sub)  # also writes it when the old file was missing
+    say(f"{a.id}: MPD playlist {old!r} -> {name!r}")
+    return {"id": a.id, "old": old, "playlist": name, "renamed": True}
 
 
 # ------------------------------------------------------------------ decisions
@@ -755,6 +789,8 @@ def main(argv=None):
     p = sp.add_parser("download", help="download the queued items"); p.add_argument("ids", nargs="*")
     p.set_defaults(fn=cmd_download)
     p = sp.add_parser("list", help="subscriptions and items"); p.add_argument("ids", nargs="*"); p.set_defaults(fn=cmd_list)
+    p = sp.add_parser("rename", help="rename a subscription's MPD playlist")
+    p.add_argument("id"); p.add_argument("name"); p.set_defaults(fn=cmd_rename)
     for p in sp.choices.values():
         p.add_argument("--json", action="store_true", help="one JSON object on stdout")
     a = ap.parse_args(argv)
