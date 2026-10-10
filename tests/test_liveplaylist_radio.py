@@ -177,6 +177,61 @@ def test_a_failed_check_changes_nothing(radio, capsys, monkeypatch):
     assert all(it["active"] for it in sub()["items"].values()) and sub()["etag"] == '"v1"'
 
 
+DAILY = ("check", "--kind", "omarchy", "--notify")
+
+
+@pytest.fixture
+def notes(monkeypatch):
+    sent = []
+    monkeypatch.setattr(musicdb, "notify", lambda *a, **k: sent.append((a, k)))
+    return sent
+
+
+def test_the_daily_check_without_a_radio_subscription_does_nothing(radio, capsys, notes):
+    code, out = call(capsys, *DAILY)
+    assert code == 0 and out == {"checks": []} and radio.requests == [] and notes == []
+
+
+def test_the_daily_check_adds_new_tracks_as_pending_and_notifies(radio, capsys, notes):
+    radio.tracks = radio.tracks[:2]
+    call(capsys, "add", "https://radio.omarchy.org/")
+    radio.tracks = json.loads(json.dumps(FIXTURE["tracks"]))
+    radio.etag = '"v2"'
+    radio.requests.clear()
+    code, out = call(capsys, *DAILY)
+    assert code == 0 and out["checks"][0]["new"] == FILES[2:]
+    assert radio.downloads() == [] and m3u(radio) == []
+    assert {sub()["items"][f]["decision"] for f in FILES[2:]} == {"pending"}
+    assert all(sub()["items"][f]["job"] is None for f in FILES)
+    assert notes == [(("2 new songs to review", "radio.omarchy.org"), {"title": "liveplaylist"})]
+    notes.clear()
+    code, _ = call(capsys, *DAILY)  # unchanged: one conditional request, no notification
+    assert code == 0 and notes == [] and radio.requests[-1] == (lp.OMARCHY_LIST, {"If-None-Match": '"v2"'})
+
+
+def test_a_failed_daily_check_records_the_error_and_exits_non_zero(radio, capsys, notes, monkeypatch):
+    call(capsys, "add", "https://radio.omarchy.org/")
+    before = sub()["items"]
+
+    def offline(url, headers=None):
+        raise RuntimeError(f"{url}: [Errno 8] nodename nor servname provided, or not known")
+    monkeypatch.setattr(lp, "http_get", offline)
+    code, out = call(capsys, *DAILY)
+    assert code == 1 and "nodename" in out["checks"][0]["error"] and notes == []
+    s = sub()
+    assert s["items"] == before and s["etag"] == '"v1"'
+    assert not s["last_check"]["ok"] and "nodename" in s["last_check"]["error"]
+
+
+def test_the_daily_check_leaves_youtube_subscriptions_alone(radio, capsys, notes):
+    yt = {"schema": lp.SCHEMA, "id": "yt-PLtest0000000000000001", "kind": "youtube", "title": "T", "playlist": "T",
+          "url": "https://www.youtube.com/playlist?list=PLtest0000000000000001", "dir": "LivePlaylists/T",
+          "items": {}}
+    lp.save(yt)
+    code, out = call(capsys, *DAILY)  # a YouTube listing here would call yt-dlp and fail
+    assert code == 0 and out == {"checks": []} and radio.requests == []
+
+
 def test_a_deleted_track_is_blocked_by_its_path_before_any_download(radio, capsys):
     rec = deletion(f"{DIR}/{FILES[0]}")
     call(capsys, "add", "https://radio.omarchy.org/")

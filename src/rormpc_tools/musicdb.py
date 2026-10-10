@@ -1117,19 +1117,19 @@ def settle(recs):
     return errors
 
 
-def notify(text, subtitle=""):
-    """Best-effort desktop notification, only for failures (rormpc shows successes in its status bar):
-    terminal-notifier, else osascript on macOS; notify-send on Linux; nothing when none is installed.
-    It never raises: a missing notifier must not fail work that is already done."""
+def notify(text, subtitle="", title="musicdb"):
+    """Best-effort desktop notification, for failures (rormpc shows successes in its status bar) and for news of a
+    job on a timer (liveplaylist's daily check): terminal-notifier, else osascript on macOS; notify-send on Linux;
+    nothing when none is installed. It never raises: a missing notifier must not fail work that is already done."""
     try:
         if sys.platform == "darwin":
             if shutil.which("terminal-notifier"):
-                cmd = ["terminal-notifier", "-title", "musicdb", "-subtitle", subtitle, "-message", text]
+                cmd = ["terminal-notifier", "-title", title, "-subtitle", subtitle, "-message", text]
             else:
                 q = lambda x: x.replace("\\", "\\\\").replace('"', '\\"')
-                cmd = ["osascript", "-e", f'display notification "{q(text)}" with title "musicdb" subtitle "{q(subtitle)}"']
+                cmd = ["osascript", "-e", f'display notification "{q(text)}" with title "{q(title)}" subtitle "{q(subtitle)}"']
         elif shutil.which("notify-send"):
-            cmd = ["notify-send", "musicdb", f"{text}\n{subtitle}".strip()]
+            cmd = ["notify-send", title, f"{text}\n{subtitle}".strip()]
         else:
             return
         subprocess.run(cmd, capture_output=True, timeout=10)  # deadline: a hung notifier must not block the job

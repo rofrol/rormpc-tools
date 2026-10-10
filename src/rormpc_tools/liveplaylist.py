@@ -3,6 +3,7 @@ tracks when you ask.
 
   liveplaylist add URL [--name NAME] [--dir DIR]   # subscribe and list it; every item waits for your review
   liveplaylist check [ID ...]                      # list again: new items wait (pending), gone ones go inactive
+  liveplaylist check --kind omarchy --notify       # the daily timer: Omarchy Radio only, a notification when new
   liveplaylist accept ID (KEY ... | --all)         # accept items and download them (--no-download: queue only)
   liveplaylist reject ID KEY ...                   # never download these items (rejects are durable)
   liveplaylist download [ID ...]                   # one worker (a second one exits) empties the queue, resumable
@@ -13,7 +14,8 @@ Every command takes --json: one JSON object on stdout, messages on stderr. ID is
 prints (yt-<playlist id>, omarchy-radio), KEY an item's key (a YouTube video id; Omarchy Radio: the track's file
 name, or its URL when it is hosted elsewhere).
 
-Sources, checked by hand, nothing on a timer:
+Sources, checked by hand; the only timer is rormpc_install.sh companions' daily `check --kind omarchy --notify`,
+which adds new Omarchy Radio items as pending and notifies, never accepts or downloads:
 - Public YouTube playlists (no mixes): `check` lists the playlist with `yt-dlp --flat-playlist -J` (no download).
 - Omarchy Radio (https://radio.omarchy.org/, kind "omarchy"): no stream, a community playlist of songs made for
   it (not on YouTube or MusicBrainz), published as /tracks/playlist.json. `check` is one conditional GET of that
@@ -47,7 +49,7 @@ command: ~/.cache/rormpc-tools/liveplaylist/status.json (atomic), its log next t
 import argparse, contextlib, datetime as dt, fcntl, json, os, pathlib, random, re, shutil, signal, subprocess, sys
 import hashlib, time, urllib.error, urllib.parse, urllib.request
 
-from . import dedupe, deleted, external, identity, mbtag, settings, yt_mp3_mb
+from . import dedupe, deleted, external, identity, mbtag, musicdb, settings, yt_mp3_mb
 
 SCHEMA = 1
 MUSIC = settings.MUSIC_DIR
@@ -405,13 +407,22 @@ def cmd_add(a):
 
 
 def cmd_check(a):
+    """List the subscriptions again (--kind: only those of that source; none of them is nothing to do). --notify:
+    a desktop notification when new items wait for review; a failed check is in the exit status and the log only,
+    the next run is its retry."""
     results = []
     for sid in a.ids or all_ids():
+        if a.kind and kind(load(sid)) != a.kind:
+            continue
         r = check_one(sid)
         say(f"{sid}: " + (f"{len(r['new'])} new, {len(r['back'])} back, {len(r['gone'])} gone"
                           + (" (partial listing: nothing marked gone)" if r["partial"] else "")
                           if r["ok"] else f"check failed, nothing changed: {r['error']}"))
         results.append(r)
+    new = sum(len(r["new"]) for r in results)
+    if a.notify and new:
+        names = ", ".join(load(r["id"])["playlist"] for r in results if r["new"])
+        musicdb.notify(f"{new} new {'song' if new == 1 else 'songs'} to review", names, title="liveplaylist")
     return {"checks": results}
 
 
@@ -778,7 +789,10 @@ def main(argv=None):
     p.add_argument("url"); p.add_argument("--name", help="MPD playlist name (default: the playlist title)")
     p.add_argument("--dir", help="where its downloads go, relative to the music dir")
     p.set_defaults(fn=cmd_add)
-    p = sp.add_parser("check", help="list the playlists again"); p.add_argument("ids", nargs="*"); p.set_defaults(fn=cmd_check)
+    p = sp.add_parser("check", help="list the playlists again"); p.add_argument("ids", nargs="*")
+    p.add_argument("--kind", choices=("youtube", "omarchy"), help="only the subscriptions of this source")
+    p.add_argument("--notify", action="store_true", help="a desktop notification when new items wait for review")
+    p.set_defaults(fn=cmd_check)
     p = sp.add_parser("accept", help="accept items (and download them)")
     p.add_argument("id"); p.add_argument("keys", nargs="*", metavar="KEY")
     p.add_argument("--all", action="store_true", help="every pending item")
