@@ -19,8 +19,9 @@ with transport commands, one datagram each, without starting a process, mpc or a
   silence or "Pause for…") end up playing; the timers see the change and cancel themselves. Previous is
   `shuffle prev` (the trail, with its key-repeat debounce) when the shuffle module runs. play, pause and stop are
   idempotent; pause also ends the gap's silence, so the gap does not play on by itself.
-- Fire and forget: nothing is answered (Karabiner's sender is unbound). Each command is logged with its source and
-  the time from receipt to MPD's answer.
+- Fire and forget: nothing is answered (Karabiner's sender is unbound). Each command is logged with its source
+  (`socket`; `nowplaying` when the payload says `"from": "nowplaying"`; `mpris` for the D-Bus methods, which queue
+  through `submit`) and the time from receipt to MPD's answer.
 """
 import asyncio, errno, fcntl, json, math, os, pathlib, socket, stat, sys, time
 
@@ -29,6 +30,8 @@ from mpd.base import CommandError
 from . import log
 
 COMMANDS = ("next", "prev", "toggle", "play", "pause", "stop", "seek")
+# senders that name themselves in the payload ("from"), for the daemon's log; anyone else is "socket"
+SENDERS = ("nowplaying",)
 MAX_DATAGRAM = 4096
 QUEUE_MAX = 32
 # sizeof(sockaddr_un.sun_path), including the terminating NUL
@@ -69,13 +72,17 @@ def parse(data):
     command = obj.get("command")
     if command not in COMMANDS:
         raise ValueError(f"unknown command {command!r}")
+    cmd = {"command": command}
+    if obj.get("from") in SENDERS:
+        cmd["from"] = obj["from"]
     if command != "seek":
-        return {"command": command}
+        return cmd
     position = obj.get("position")
     if isinstance(position, bool) or not isinstance(position, (int, float)) or not math.isfinite(position) \
             or position < 0:
         raise ValueError(f"seek needs a position in seconds, got {position!r}")
-    return {"command": "seek", "position": float(position)}
+    cmd["position"] = float(position)
+    return cmd
 
 
 class DropLog:
@@ -191,11 +198,17 @@ def enqueue(d, data, source):
     except ValueError as e:
         d.drops.note(f"dropped a {source} datagram: {e}")
         return
+    submit(d, cmd, cmd.pop("from", source))
+
+
+def submit(d, cmd, source):
+    """Queue a parsed command for the daemon's next step; MPRIS calls this directly. False when the queue is full."""
     if len(d.commands) >= QUEUE_MAX:
         d.drops.note(f"queue full ({QUEUE_MAX}), dropped {cmd['command']} from {source}")
-        return
+        return False
     d.commands.append((cmd, source, time.monotonic()))
     d.wake()
+    return True
 
 
 async def run_command(d, item):
@@ -270,9 +283,19 @@ async def _stop(d, cmd):
 
 
 async def _seek(d, cmd):
-    if (await d.mpd.status()).get("state") == "stop":
+    s = await d.mpd.status()
+    if s.get("state") == "stop":
         raise CommandError("nothing is playing")
-    await d.mpd.seekcur(f"{cmd['position']:.3f}")
+    if "offset" not in cmd:
+        await d.mpd.seekcur(f"{cmd['position']:.3f}")
+        return ""
+    # MPRIS Seek: relative to where the song is now; before its start is its start, past its end is Next
+    position = max(0.0, float(s.get("elapsed", 0)) + cmd["offset"])
+    duration = s.get("duration")
+    if duration is not None and position >= float(duration):
+        return "past the end: " + (await _next(d, {"command": "next"}) or "next")
+    await d.mpd.seekcur(f"{position:.3f}")
+    return f"to {position:.1f} s"
 
 
 TRANSPORT = {"next": _next, "prev": _prev, "toggle": _toggle, "play": _play, "pause": _pause, "stop": _stop,
@@ -300,10 +323,13 @@ def check(path=None):
     return 0
 
 
-def send(command, position=None, path=None):
-    """`mpd-player send`: one canonical datagram, fire and forget. Returns the exit status."""
+def deliver(command, position=None, path=None, sender=None):
+    """One canonical datagram, fire and forget (non-blocking, safe from any thread). None when it was sent, else why
+    not: mpd-player is not running or not reading."""
     path = pathlib.Path(path) if path else socket_path()
     payload = {"command": command}
+    if sender:
+        payload["from"] = sender
     if command == "seek":
         payload["position"] = position
     s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -311,16 +337,22 @@ def send(command, position=None, path=None):
     try:
         s.sendto(json.dumps(payload).encode(), os.fspath(path))
     except FileNotFoundError:
-        print(f"mpd-player is not running (no socket at {path})", file=sys.stderr)
-        return 1
+        return f"mpd-player is not running (no socket at {path})"
     except ConnectionRefusedError:
-        print(f"mpd-player is not running (nobody bound at {path})", file=sys.stderr)
-        return 1
+        return f"mpd-player is not running (nobody bound at {path})"
     except OSError as e:
         if e.errno in (errno.ENOBUFS, errno.EAGAIN):
-            print(f"mpd-player is not reading its socket {path} (buffer full)", file=sys.stderr)
-            return 1
+            return f"mpd-player is not reading its socket {path} (buffer full)"
         raise
     finally:
         s.close()
+    return None
+
+
+def send(command, position=None, path=None):
+    """`mpd-player send`: one canonical datagram, fire and forget. Returns the exit status."""
+    why = deliver(command, position, path)
+    if why:
+        print(why, file=sys.stderr)
+        return 1
     return 0

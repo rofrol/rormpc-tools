@@ -6,6 +6,8 @@ rormpc, so phones, media keys and mpc see the same behaviour.
                              # seek SECONDS); exits 1 when mpd-player is not running
   mpd-player socket-path [--check]   # where the command socket is (media keys: Karabiner's send_user_command);
                              # --check: whether a daemon is bound to it
+  mpd-player nowplaying      # macOS: MPD in Now Playing (Control Center, AirPods, ...), a second process whose
+                             # commands go to the socket; see nowplaying.py
 
 Modules (one file each in this package) see every change of MPD's player, options, mixer and queue, can set a
 wall-clock deadline (it survives the Mac sleeping past it) and take commands from clients over MPD's
@@ -22,7 +24,8 @@ this daemon (temp file + rename), read by rormpc to show it.
   (`pause start SECONDS`, ...).
 
 Transport commands (next, prev, toggle, play, pause, stop, seek) come over a datagram socket instead, one JSON
-object per datagram (`{"command": "next"}`), e.g. from media keys; see control.py.
+object per datagram (`{"command": "next"}`), e.g. from media keys; see control.py. On Linux the daemon is also the
+MPRIS player `org.mpris.MediaPlayer2.mpd_player` when a session bus is there (`--no-mpris`: not); see mpris.py.
 """
 import argparse, asyncio, collections, json, os, pathlib, signal, sys, time
 
@@ -207,12 +210,15 @@ def parse_args(argv=None):
     ap.add_argument("--seconds", type=float, default=3,
                     help="silence between songs until one is chosen with `gap set N` (then that is remembered)")
     ap.add_argument("--socket", metavar="PATH", help="the command socket (default: see `mpd-player socket-path`)")
+    ap.add_argument("--no-mpris", action="store_true", help="Linux: do not register as an MPRIS player")
     sub = ap.add_subparsers(dest="action")
     path = sub.add_parser("socket-path", help="print the command socket's path")
     path.add_argument("--check", action="store_true", help="also whether a daemon is bound (exit 1 when not)")
     send = sub.add_parser("send", help="send one transport command to the running daemon (fire and forget)")
     send.add_argument("command", choices=COMMANDS)
     send.add_argument("position", nargs="?", type=float, help="seek: the position in seconds")
+    np = sub.add_parser("nowplaying", help="macOS: show MPD in Now Playing, its commands to the running daemon")
+    np.add_argument("--check", action="store_true", help="only load the frameworks it needs (exit 0 when they load)")
     a = ap.parse_args(argv)
     if a.action == "send" and (a.command == "seek") != (a.position is not None):
         ap.error("seek takes a position in seconds, the other commands none")
@@ -228,7 +234,11 @@ async def _main(a):
             sock = None
         c = MPDClient()
         await c.connect(os.environ.get("MPD_HOST", "localhost"), int(os.environ.get("MPD_PORT", 6600)))
-        await Daemon(c, [gap.Gap(a.seconds), upnext.UpNext(), shuffle.Shuffle(), pause.Pause()], sock).run()
+        modules = [gap.Gap(a.seconds), upnext.UpNext(), shuffle.Shuffle(), pause.Pause()]
+        if sys.platform != "darwin" and not a.no_mpris:  # macOS: `mpd-player nowplaying`, a process of its own
+            from . import mpris
+            modules.append(mpris.Mpris())
+        await Daemon(c, modules, sock).run()
     finally:
         if sock is not None:
             sock.close()
@@ -244,6 +254,9 @@ def main():
         return
     if a.action == "send":
         sys.exit(control.send(a.command, a.position, a.socket))
+    if a.action == "nowplaying":
+        from . import nowplaying
+        sys.exit(nowplaying.main(a))
     try:
         asyncio.run(_main(a))
     except asyncio.CancelledError:  # SIGTERM (launchctl/systemctl stop): the socket was unlinked

@@ -9,7 +9,7 @@ They work from the shell too; each one's usage is in its `--help`.
 | `musicdb` | play history (ListenBrainz, MPD log, Takeout, Spotify export) -> MPD stickers `plays`, `lastPlayed`, `skips` and mpd-player's shuffle weights; likes to ListenBrainz; `delete` / `undo` behind rormpc's Ctrl-x / Ctrl-y, `restore` behind its Deleted overlay |
 | `musicdb chart` | a standalone HTML page: my top 10 of each listening year as an animated bar chart race (the weighted shuffle's own picks left out), how my most played songs rose and fell (top 10 ranks, top 100 shares), which source the plays come from |
 | `musicdb lyrics` | lyrics from LRCLIB into `lyrics_dir` (`.lrc` synced, `.txt` plain) for rormpc's Lyrics pane; `candidates` / `use` pick another entry; `translate` takes one song's Polish translation from tekstowo.pl on request (personal use: one song per call, cached in `<song>.pl.json`, never committed anywhere), or when it has none a literal line-by-line machine translation by Claude through the Claude Code CLI (`claude -p` with its own login, no API key; the lyrics go to Anthropic; model: `translate_model`), `lang` overrides the detected language |
-| `mpd-player` | the playback daemon (runs with rormpc closed): silence between songs, Up next, weighted shuffle by plays and likes with "heard enough" cooldowns, pause for a while (plays on at a wall-clock deadline unless anyone did anything meanwhile); commands over MPD messages on channel `rormpc`, see its `--help`; media keys and scripts send next, prev, toggle, ... to its [command socket](#mpd-players-command-socket) |
+| `mpd-player` | the playback daemon (runs with rormpc closed): silence between songs, Up next, weighted shuffle by plays and likes with "heard enough" cooldowns, pause for a while (plays on at a wall-clock deadline unless anyone did anything meanwhile); commands over MPD messages on channel `rormpc`, see its `--help`; media keys and scripts send next, prev, toggle, ... to its [command socket](#mpd-players-command-socket); MPD in macOS's Now Playing (`mpd-player nowplaying`) and as the Linux MPRIS player, [with the same commands](#now-playing-macos-and-mpris-linux) |
 | `yt-mp3-mb` | YouTube -> mp3 identified on MusicBrainz, tagged, cover embedded; `--batch --json` for programs: no questions, uncertain matches left for review, a rerun skips what the target dir has |
 | `liveplaylist` | a public YouTube playlist or [Omarchy Radio](https://radio.omarchy.org/) as a "live" MPD playlist (rormpc's Live playlists pane): `add URL`, `check` for new tracks (Omarchy Radio also once a day: rormpc's `companions` run `check --kind omarchy --notify`, which only adds them as pending and notifies), `accept` / `reject` them, `download`, `list`, `rename` its MPD playlist; every command takes `--json` |
 | `yt-playlist` | your YouTube playlists through the YouTube Data API (OAuth), for removing deleted songs |
@@ -77,6 +77,23 @@ the absolute path, without `~`):
 ```
 
 (F7 `prev`, F8 `toggle`.)
+
+### Now Playing (macOS) and MPRIS (Linux)
+
+Control Center, the lock screen, AirPods, Shift+F7/F8/F9 and the Linux desktops' media keys reach MPD through
+mpd-player too, so they act like the keys above: Previous walks the weighted shuffle's trail (no skip counted), Next
+from a pause plays the next song, Play/Pause/Stop never toggle.
+
+- macOS: `mpd-player nowplaying`, a second process with its own launchd agent (`rormpc_install.sh companions`
+  starts it and retires mpd-now-playable). It shows the song (title, artist, album, cover, position) and sends every
+  command it gets to the command socket; it never talks to MPD's transport itself. It takes Now Playing only once
+  MPD plays after it starts, so a paused MPD at login leaves the slot to a browser or Music; from then on it shows
+  MPD's real state. Log: `~/Library/Logs/mpd-player-nowplaying.log`; each command also shows in mpd-player's log as
+  `command next from nowplaying: ...`.
+- Linux: the daemon itself is `org.mpris.MediaPlayer2.mpd_player` on the session bus (no extra unit), on by default
+  when a session bus is there (`--no-mpris`: off). `playerctl -p mpd_player next|previous|play-pause|metadata` pins a
+  key to MPD while a browser is the active player. Run no other MPD MPRIS bridge (mpd-mpris, mpDris2, rmpcd) beside
+  it: both would answer the keys; the daemon and the installer warn when they see one.
 
 ## Install
 

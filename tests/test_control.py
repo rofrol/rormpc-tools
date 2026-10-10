@@ -37,6 +37,8 @@ def run(coro):
     (b'{"command": "seek", "position": 0}', {"command": "seek", "position": 0.0}),
     (b"next", {"command": "next"}),
     (b"prev\n", {"command": "prev"}),  # echo | socat
+    (b'{"command": "prev", "from": "nowplaying"}', {"command": "prev", "from": "nowplaying"}),
+    (b'{"command": "prev", "from": "someone"}', {"command": "prev"}),  # only known senders name themselves
 ])
 def test_accepted_payloads(data, want):
     assert control.parse(data) == want
@@ -204,6 +206,14 @@ def test_datagrams_are_queued_in_order_and_wake_the_daemon(short):
 
     assert run(main()) == [{"command": "next"}, {"command": "seek", "position": 12.5}, {"command": "toggle"}]
     s.close()
+
+
+def test_a_sender_that_names_itself_is_the_commands_source():
+    d = player.Daemon(Idle(), [])
+    control.enqueue(d, b'{"command": "next", "from": "nowplaying"}', "socket")
+    control.enqueue(d, b"next", "socket")
+    assert [(c, src) for c, src, _ in d.commands] == [({"command": "next"}, "nowplaying"),
+                                                      ({"command": "next"}, "socket")]
 
 
 def test_the_queue_drops_the_newest_beyond_its_bound(capsys):

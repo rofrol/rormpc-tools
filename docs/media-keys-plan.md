@@ -2,8 +2,35 @@
 
 Status: stage 1 built (2026-10-10): the command socket (section 1, `player/control.py`, the client is
 `mpd-player send`) and the installer's hint and status (section 4 steps 5-6); the Karabiner switch is the user's,
-with the old shell script deleted. Stage 2, Now Playing and MPRIS (sections 2-3, section 4 steps 3-4), is not
-built. Checked on a scratch MPD 0.24.15: `next`, `previous` and `playid` from a paused player play; `seekcur`
+with the old shell script deleted. Stage 2 built (2026-10-10): Now Playing as `mpd-player nowplaying`
+(`player/nowplaying.py`), MPRIS in the daemon (`player/mpris.py`), the installer's steps 3-4 and status lines in
+rormpc; the Control Center tile, AirPods and the acceptance gates are the user's live test after the install. Built
+differently from the text below, each for a reason found while building:
+
+- Now Playing's MPD thread runs python-mpd2's asyncio client on its own plain asyncio loop (monotonic clock, not
+  Cocoa's), not the blocking client: python-mpd2 3.1's blocking client has no `noidle`, so a refresh after wake
+  could not interrupt its idle. The Cocoa main thread still has no asyncio.
+- Nothing of MediaPlayer is touched before the claim: MPNowPlayingInfoCenter and the MPRemoteCommandCenter targets
+  are set up when MPD is first seen playing, so the process cannot take Now Playing while MPD is paused or stopped.
+- The cover is fetched before the info is posted (same thread, same snapshot), so it can never belong to another
+  song; covers over 4 MiB are left out.
+- The Now Playing process names itself in the datagram (`"from": "nowplaying"`, an allowlisted label, unknown ones
+  ignored), so the daemon's log shows `command next from nowplaying`.
+- MPRIS `Position` is the latest status's elapsed plus the time since while playing: dbus-fast property getters are
+  synchronous and cannot ask MPD. `Seeked` is signalled when the same song is more than a second from where the last
+  status put it (any seek, from any client), not from the event that carried it, which mistook our own commands for
+  seeks on a private bus. `Volume` is read only (not a transport command). The name is requested with replacement
+  allowed and queued (D-Bus puts the replaced owner back in the queue), so a player that takes it hands it back when
+  it leaves, without a re-request; a lost bus is reconnected once on that event.
+- MPRIS `Seek` past the song's end is Next and before its start the start (the spec), done in the daemon's `seek`
+  with an internal `offset`; the socket protocol is unchanged.
+
+Checked on a scratch MPD 0.24.15 (port 6650) with a private dbus-daemon: every MPRIS method through the daemon's
+queue (1-5 ms to MPD), SetPosition for another track ignored, PropertiesChanged and Seeked as above, the name
+taken by another client and returned, the bus killed (logged, one reconnect, the socket still works).
+`mpd-player nowplaying` started against a stopped scratch MPD (no claim, no MediaPlayer call) and exited 1 when MPD
+went away. Open: what `pause` (from a key, Now Playing or MPRIS) does while "Pause for…" holds the pause: today
+nothing, the timer plays on at its deadline (rormpc's TODO). Checked on a scratch MPD 0.24.15: `next`, `previous` and `playid` from a paused player play; `seekcur`
 leaves it paused; `next` at the last song stops; `next` while stopped answers "Not playing". The decisions on the
 open choices are in rormpc's TODO ("Media keys through mpd-player").
 
