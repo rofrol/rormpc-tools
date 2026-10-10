@@ -2,6 +2,10 @@
 rormpc, so phones, media keys and mpc see the same behaviour.
 
   mpd-player [--seconds 3]   # runs until killed; installed and started by `rormpc_install.sh companions`
+  mpd-player send next       # a transport command over the command socket (next prev toggle play pause stop,
+                             # seek SECONDS); exits 1 when mpd-player is not running
+  mpd-player socket-path [--check]   # where the command socket is (media keys: Karabiner's send_user_command);
+                             # --check: whether a daemon is bound to it
 
 Modules (one file each in this package) see every change of MPD's player, options, mixer and queue, can set a
 wall-clock deadline (it survives the Mac sleeping past it) and take commands from clients over MPD's
@@ -16,8 +20,11 @@ this daemon (temp file + rename), read by rormpc to show it.
   played, without counting a skip (send it instead of `mpc prev`).
 - pause: pause for a while, MPD plays on at the deadline unless someone did anything meanwhile
   (`pause start SECONDS`, ...).
+
+Transport commands (next, prev, toggle, play, pause, stop, seek) come over a datagram socket instead, one JSON
+object per datagram (`{"command": "next"}`), e.g. from media keys; see control.py.
 """
-import argparse, asyncio, json, os, pathlib, sys, time
+import argparse, asyncio, collections, json, os, pathlib, signal, sys, time
 
 from mpd.asyncio import MPDClient
 from mpd.base import CommandError
@@ -89,12 +96,19 @@ class Module:
 
 
 class Daemon:
-    def __init__(self, mpd, modules):
+    def __init__(self, mpd, modules, socket=None):
+        from .control import DropLog
         self.mpd = mpd
         self.modules = {m.name: m for m in modules}
         self.status = {}
+        self.socket = socket  # control.Socket, bound, or None
+        self.commands = collections.deque()  # (command, source, receipt time) from the socket, run in step()
+        self.drops = DropLog()
         self._pending = set()
         self._event = asyncio.Event()
+
+    def wake(self):
+        self._event.set()
 
     async def _watch(self):
         async for changed in self.mpd.idle(SUBSYSTEMS):
@@ -114,7 +128,12 @@ class Daemon:
             log(f"{name} {verb}: {e}")
 
     async def step(self, changed):
-        """One round: messages, status to every module, due timers. True when a timer fired (read again)."""
+        """One round: socket commands, messages, status to every module, due timers. True when a timer fired (read
+        again)."""
+        if self.commands:
+            from .control import run_command
+            while self.commands:  # a command queued meanwhile also runs now, in order
+                await run_command(self, self.commands.popleft())
         if "message" in changed:
             for m in await self.mpd.readmessages():
                 if m.get("channel") == CHANNEL:
@@ -149,6 +168,18 @@ class Daemon:
         return min(MAX_WAIT, max(0.0, min(dues) - time.time()))
 
     async def run(self):
+        transport = None
+        if self.socket is not None and self.socket.sock is not None:  # bound before the channel is subscribed
+            from .control import Receiver
+            transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+                lambda: Receiver(self), sock=self.socket.sock)
+        try:
+            await self._run()
+        finally:
+            if transport is not None:
+                transport.close()
+
+    async def _run(self):
         await self.mpd.subscribe(CHANNEL)
         for m in self.modules.values():
             await m.start(self)
@@ -170,19 +201,53 @@ class Daemon:
                 watcher.result()  # the connection is gone: raise, launchd restarts us
 
 
-async def _main():
-    from . import gap, pause, shuffle, upnext
+def parse_args(argv=None):
+    from .control import COMMANDS
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seconds", type=float, default=3,
                     help="silence between songs until one is chosen with `gap set N` (then that is remembered)")
-    a = ap.parse_args()
-    c = MPDClient()
-    await c.connect(os.environ.get("MPD_HOST", "localhost"), int(os.environ.get("MPD_PORT", 6600)))
-    await Daemon(c, [gap.Gap(a.seconds), upnext.UpNext(), shuffle.Shuffle(), pause.Pause()]).run()
+    ap.add_argument("--socket", metavar="PATH", help="the command socket (default: see `mpd-player socket-path`)")
+    sub = ap.add_subparsers(dest="action")
+    path = sub.add_parser("socket-path", help="print the command socket's path")
+    path.add_argument("--check", action="store_true", help="also whether a daemon is bound (exit 1 when not)")
+    send = sub.add_parser("send", help="send one transport command to the running daemon (fire and forget)")
+    send.add_argument("command", choices=COMMANDS)
+    send.add_argument("position", nargs="?", type=float, help="seek: the position in seconds")
+    a = ap.parse_args(argv)
+    if a.action == "send" and (a.command == "seek") != (a.position is not None):
+        ap.error("seek takes a position in seconds, the other commands none")
+    return a
+
+
+async def _main(a):
+    from . import control, gap, pause, shuffle, upnext
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)  # unlink on stop
+    sock = control.Socket(a.socket or control.socket_path())
+    try:
+        if not sock.open():
+            sock = None
+        c = MPDClient()
+        await c.connect(os.environ.get("MPD_HOST", "localhost"), int(os.environ.get("MPD_PORT", 6600)))
+        await Daemon(c, [gap.Gap(a.seconds), upnext.UpNext(), shuffle.Shuffle(), pause.Pause()], sock).run()
+    finally:
+        if sock is not None:
+            sock.close()
 
 
 def main():
-    asyncio.run(_main())
+    from . import control
+    a = parse_args()
+    if a.action == "socket-path":
+        if a.check:
+            sys.exit(control.check(a.socket))
+        print(a.socket or control.socket_path())
+        return
+    if a.action == "send":
+        sys.exit(control.send(a.command, a.position, a.socket))
+    try:
+        asyncio.run(_main(a))
+    except asyncio.CancelledError:  # SIGTERM (launchctl/systemctl stop): the socket was unlinked
+        pass
 
 
 if __name__ == "__main__":

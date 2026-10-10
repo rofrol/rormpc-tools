@@ -9,7 +9,7 @@ They work from the shell too; each one's usage is in its `--help`.
 | `musicdb` | play history (ListenBrainz, MPD log, Takeout, Spotify export) -> MPD stickers `plays`, `lastPlayed`, `skips` and mpd-player's shuffle weights; likes to ListenBrainz; `delete` / `undo` behind rormpc's Ctrl-x / Ctrl-y, `restore` behind its Deleted overlay |
 | `musicdb chart` | a standalone HTML page: my top 10 of each listening year as an animated bar chart race (the weighted shuffle's own picks left out), how my most played songs rose and fell (top 10 ranks, top 100 shares), which source the plays come from |
 | `musicdb lyrics` | lyrics from LRCLIB into `lyrics_dir` (`.lrc` synced, `.txt` plain) for rormpc's Lyrics pane; `candidates` / `use` pick another entry; `translate` takes one song's Polish translation from tekstowo.pl on request (personal use: one song per call, cached in `<song>.pl.json`, never committed anywhere), or when it has none a literal line-by-line machine translation by Claude through the Claude Code CLI (`claude -p` with its own login, no API key; the lyrics go to Anthropic; model: `translate_model`), `lang` overrides the detected language |
-| `mpd-player` | the playback daemon (runs with rormpc closed): silence between songs, Up next, weighted shuffle by plays and likes with "heard enough" cooldowns, pause for a while (plays on at a wall-clock deadline unless anyone did anything meanwhile); commands over MPD messages on channel `rormpc`, see its `--help` |
+| `mpd-player` | the playback daemon (runs with rormpc closed): silence between songs, Up next, weighted shuffle by plays and likes with "heard enough" cooldowns, pause for a while (plays on at a wall-clock deadline unless anyone did anything meanwhile); commands over MPD messages on channel `rormpc`, see its `--help`; media keys and scripts send next, prev, toggle, ... to its [command socket](#mpd-players-command-socket) |
 | `yt-mp3-mb` | YouTube -> mp3 identified on MusicBrainz, tagged, cover embedded; `--batch --json` for programs: no questions, uncertain matches left for review, a rerun skips what the target dir has |
 | `liveplaylist` | a public YouTube playlist or [Omarchy Radio](https://radio.omarchy.org/) as a "live" MPD playlist (rormpc's Live playlists pane): `add URL`, `check` for new tracks (Omarchy Radio also once a day: rormpc's `companions` run `check --kind omarchy --notify`, which only adds them as pending and notifies), `accept` / `reject` them, `download`, `list`, `rename` its MPD playlist; every command takes `--json` |
 | `yt-playlist` | your YouTube playlists through the YouTube Data API (OAuth), for removing deleted songs |
@@ -46,6 +46,37 @@ hits --years -1991 --rank plays --years-of release                    # an open 
 hits --set +likes --rank rediscover
 hits sets; hits exceptions; hits lists                                 # read only
 ```
+
+### mpd-player's command socket
+
+Transport commands reach mpd-player as datagrams on a Unix socket, for media keys (Karabiner-Elements'
+`send_user_command`: no process, no mpc and no DNS lookup per press) and scripts. Module commands (`gap set 5`,
+`shuffle on`, ...) stay on MPD's channel.
+
+- Path: `$XDG_RUNTIME_DIR/rormpc/player.sock` when that is set (Linux), else `$XDG_STATE_HOME/rormpc/player.sock`
+  (`~/.local/state/rormpc/player.sock`); `mpd-player socket-path` prints it (`--check`: and whether a daemon is bound), `mpd-player --socket PATH` overrides
+  it. Only the same user can send: the directory is 0700 (an older 0755 state directory is narrowed), the socket
+  0600. One daemon owns it (`player.lock`); a second one runs without it.
+- Payload: one JSON object per datagram, `{"command": "next"}`, `{"command": "seek", "position": 83.5}`; a bare
+  word (`next`) also works. Anything else is dropped and logged.
+- Commands: `next`, `prev` (with the weighted shuffle the same as `shuffle prev`: back through the songs that really
+  played, no skip counted), `toggle`, `play`, `pause`, `stop` (the last three idempotent), `seek` (absolute
+  seconds). Each reads MPD's state first. Next and Previous from a pause play the song they move to, also inside the
+  gap's silence or "Pause for…", whose timers are then cancelled; `pause` inside the gap's silence stays paused.
+- Nothing is answered: `mpd-player send next` (or `send seek 30`) exits 1 with "mpd-player is not running" when no
+  daemon listens, else 0; the daemon logs each command with the time from receipt to MPD's answer. When mpd-player
+  is down, a media key does nothing (launchd/systemd restarts it).
+
+The Karabiner rule for bare F7/F8/F9 (`rormpc_install.sh companions` prints it with your path; the `endpoint` is
+the absolute path, without `~`):
+
+```json
+{"type": "basic", "from": {"key_code": "f9"},
+ "to": [{"send_user_command": {"endpoint": "/Users/YOU/.local/state/rormpc/player.sock",
+                               "payload": {"command": "next"}}}]}
+```
+
+(F7 `prev`, F8 `toggle`.)
 
 ## Install
 

@@ -1,6 +1,11 @@
 # Media keys through mpd-player: plan
 
-Status: plan only. Nothing is built yet; the open choices at the end need a decision first.
+Status: stage 1 built (2026-10-10): the command socket (section 1, `player/control.py`, the client is
+`mpd-player send`) and the installer's hint and status (section 4 steps 5-6); the Karabiner switch is the user's,
+with the old shell script deleted. Stage 2, Now Playing and MPRIS (sections 2-3, section 4 steps 3-4), is not
+built. Checked on a scratch MPD 0.24.15: `next`, `previous` and `playid` from a paused player play; `seekcur`
+leaves it paused; `next` at the last song stops; `next` while stopped answers "Not playing". The decisions on the
+open choices are in rormpc's TODO ("Media keys through mpd-player").
 
 ## Why
 
@@ -64,7 +69,9 @@ that is expected rather than read in the source, so the live test checks it (a h
   and runs without the socket, like every other socket failure below.
 - Access: the directory is created 0700 and the socket chmod 0600 right after `bind` (with `umask 077` around the
   bind, so there is no window with wider bits). At start the daemon checks that the directory is a real directory
-  (not a symlink) owned by its uid with no group/other bits, and refuses the socket otherwise. Only the same user
+  (not a symlink) owned by its uid, and refuses the socket otherwise; group/other bits on it are taken away (built:
+  the state directory older mpd-players created is 0755, and refusing it would leave every Mac without the
+  socket). Only the same user
   can send. No token: anyone with the user's uid can already send the same commands over MPD's client-to-client
   channel.
 - One owner: the daemon takes an exclusive `flock` on `player.lock` beside the socket and holds it for its whole
