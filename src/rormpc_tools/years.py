@@ -198,6 +198,65 @@ def short(mbid):
     return (mbid or "")[:8]
 
 
+def performances(rec):
+    return [r for r in rec.get("relations", []) if r.get("target-type") == "work" and r.get("type") == "performance"]
+
+
+def work_candidates(rec, matched, perf, attrs, length, classes):
+    """(clean, same): the recordings of `rec`'s first work by its first artist that are no video, no DJ-mix segment
+    and no version (search entries, `rec` itself when it is clean), and those of them within SAME_LENGTH_MS of
+    `length`."""
+    w = work(perf[0]["work"]["id"]) or {}
+    rels = [r for r in w.get("relations", []) if r.get("target-type") == "recording" and r.get("recording")]
+    # a video or DJ-mix segment of a cover: the artist's plain recordings are covers too (the same first artist
+    # keeps them from collapsing into the original's)
+    own_attrs = VERSION_ATTRS & set(attrs)
+    ids = []
+    for r in rels:
+        c = r["recording"]
+        if c.get("video") or dj_mix(c) or version_word(c, set(r.get("attributes", [])) - own_attrs):
+            continue
+        ids.append((0 if length and c.get("length") and abs(c["length"] - length) <= SAME_LENGTH_MS else 1, c["id"]))
+    ids = [i for _, i in sorted(ids)]
+    if len(ids) > SEARCH_MAX:
+        classes.append("candidates-truncated")
+    found_ids = dated([i for i in ids[:SEARCH_MAX] if i != matched])
+    if not rec.get("video") and not dj_mix(rec):
+        found_ids[matched] = rec
+    artist = first_artist(rec)
+    clean = [c for c in found_ids.values() if first_artist(c) == artist and not c.get("video") and not dj_mix(c)
+             and not version_word(c)]
+    same = [c for c in clean if length and c.get("length") and abs(c["length"] - length) <= SAME_LENGTH_MS]
+    return clean, same
+
+
+def audio_for(mbid, length=None):
+    """For a download matched to a video or DJ-mix segment with no audio alternative among its candidates: the
+    work's recording to take instead, by the same first artist, no video, no DJ-mix segment, no version, within
+    10 s of the matched length (the recording's, else `length` in ms, the download's), the one with the earliest
+    official Album/Single/EP release first, else the earliest first release.
+    Returns (recording id, rule, why): the id is None, with the reason in why, when there is none."""
+    rec = recording(mbid)
+    if not rec:
+        return None, None, "recording not found on MusicBrainz"
+    perf = performances(rec)
+    if not perf:
+        return None, None, "no work relationship on MusicBrainz"
+    attrs = perf[0].get("attributes", [])
+    length = rec.get("length") or length
+    if not length:
+        return None, None, "no length to compare"
+    _, same = work_candidates(rec, rec.get("id") or mbid, perf, attrs, length, [])
+    same = [c for c in same if c["id"] != (rec.get("id") or mbid)]
+    if not same:
+        return None, None, "no audio recording of the work within 10 s"
+    if found := scan(same):
+        c = found[2]
+        return c["id"], "work-same-length", f"\"{c.get('title')}\" on \"{found[1].get('title')}\" {found[0]}"
+    c = min(same, key=lambda c: c.get("first-release-date") or "9999")
+    return c["id"], "work-same-length-no-studio", f"\"{c.get('title')}\", first released {c.get('first-release-date')}"
+
+
 def compute(mbid):
     """The rule for one recording MBID: {"tdor", "tdrc_own", "rule", "source", "release", "rg_date", "classes",
     "needs_mbid", "evidence"}; "tdor" is None without a proposal."""
@@ -210,7 +269,7 @@ def compute(mbid):
         return out
     out["matched"] = rec.get("id") or mbid  # MusicBrainz redirects merged recordings
     out["tdrc_own"] = rec.get("first-release-date") or None
-    perf = [r for r in rec.get("relations", []) if r.get("target-type") == "work" and r.get("type") == "performance"]
+    perf = performances(rec)
     attrs = perf[0].get("attributes", []) if perf else []
     flags = []
     if rec.get("video"):
@@ -239,28 +298,7 @@ def compute(mbid):
         out["evidence"] = matched + "; no work relationship on MusicBrainz"
         return out
     else:
-        w = work(perf[0]["work"]["id"]) or {}
-        length = rec.get("length")
-        rels = [r for r in w.get("relations", []) if r.get("target-type") == "recording" and r.get("recording")]
-        # a video or DJ-mix segment of a cover: the artist's plain recordings are covers too (the same first artist
-        # keeps them from collapsing into the original's)
-        own_attrs = VERSION_ATTRS & set(attrs)
-        ids = []
-        for r in rels:
-            c = r["recording"]
-            if c.get("video") or dj_mix(c) or version_word(c, set(r.get("attributes", [])) - own_attrs):
-                continue
-            ids.append((0 if length and c.get("length") and abs(c["length"] - length) <= SAME_LENGTH_MS else 1, c["id"]))
-        ids = [i for _, i in sorted(ids)]
-        if len(ids) > SEARCH_MAX:
-            out["classes"].append("candidates-truncated")
-        found_ids = dated([i for i in ids[:SEARCH_MAX] if i != out["matched"]])
-        if not rec.get("video") and not dj_mix(rec):
-            found_ids[out["matched"]] = rec
-        artist = first_artist(rec)
-        clean = [c for c in found_ids.values() if first_artist(c) == artist and not c.get("video") and not dj_mix(c)
-                 and not version_word(c)]
-        same = [c for c in clean if length and c.get("length") and abs(c["length"] - length) <= SAME_LENGTH_MS]
+        clean, same = work_candidates(rec, out["matched"], perf, attrs, rec.get("length"), out["classes"])
         for rule, group in (("same-length", same), ("any-clean", clean)):
             if group and (found := scan(group)):
                 break

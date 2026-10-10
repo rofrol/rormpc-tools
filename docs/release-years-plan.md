@@ -3,7 +3,7 @@
 Status: decided 2026-10-10 (see "Decisions" at the end). Stage A is built: `musicdb years` (src/rormpc_tools/years.py)
 computes the rule, writes the dry-run report, records decisions by id, applies and rolls back; `hits` reads
 `originaldate`; `write_year` writes TDOR from the rule on new downloads. Stage B: rormpc's "Years to review" view
-and its MBID picker; stage C: the video-to-audio swap through the work on download.
+and its MBID picker; stage C (built): the video-to-audio swap through the work on download.
 
 ## The problem
 
@@ -111,8 +111,14 @@ else is **review**. A proposal later than the current year is never applied with
 - Done (`mbtag: avoid music-video recordings when matching`): `resolve()` now treats MusicBrainz's `video` flag
   like "(video)" in the title and prefers an audio alternative of the same song already among the candidates.
   In an earlier retag's evidence, 60 matches were video recordings and at least 24 had such an alternative.
-- Next: when no alternative is an audio recording, find one through the work (as in the rule above) instead of
-  keeping the video; a DJ-mix segment gets the same treatment.
+- Done (stage C, `mbtag: swap a video match to the work's audio recording`): when no alternative is an audio
+  recording, `resolve()` looks the work up (`years.audio_for`) and takes its recording by the same first artist
+  that is no video, no DJ-mix segment and no version, within ±10 s of the matched length (the download's length
+  when the recording has none), the one with the earliest official Album/Single/EP release first, else the
+  earliest first release. A DJ-mix segment gets the same treatment. The row's `swap` evidence records from → to
+  and the rule (`alternative`, `work-same-length`, `work-same-length-no-studio`), or the reason the match was kept
+  (no work relationship, nothing within 10 s, a failed lookup). Existing library files are not retagged: the
+  years review covers them.
 - Done: `write_year` writes TDRC = the recording's own first release and TDOR = the rule's result, with
   `DATE_SOURCE` and `DATE_RULE`, instead of the same date twice. A download is not reviewed, so a proposal later
   than the recording's own first release is not taken (8 of 9 later proposals were wrong): TDOR stays that first

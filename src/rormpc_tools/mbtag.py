@@ -328,6 +328,7 @@ def from_recording(d, rec):
     ac = rec.get("artist-credit", [])
     return {"mbid": rec["id"], "title": rec["title"],  # MB may redirect merged recordings -> returned id
             "video": bool(rec.get("video")),  # MB marks music videos; their first release is often a video DVD
+            "disambiguation": rec.get("disambiguation") or "",  # "part of a DJ-mix" marks a mix segment
             "artist": "".join(a["name"] + a.get("joinphrase", "") for a in ac),
             "artist_mbids": [a["artist"]["id"] for a in ac],
             "mb_length": round((rec.get("length") or 0) / 1000),
@@ -367,8 +368,29 @@ def mb_search_fallback(d):
     return None
 
 
+def swap_through_work(d, row):
+    """Swap a video or DJ-mix match (row, changed in place) to its work's same-length audio recording
+    (years.audio_for). Returns the evidence: {"from", "to", "rule", "why"}; "to" is None when the match is kept.
+    A failed lookup keeps the match: it never loses the download."""
+    from . import years
+    src = row["mbid"]
+    try:
+        to, rule, why = years.audio_for(src, round(d["duration"] * 1000) or None)
+        rec = mb_recording(to) if to else None
+        if to and not rec:
+            to, rule, why = None, None, f"recording {to} not found on MusicBrainz"
+    except Exception as e:  # network, an unexpected MusicBrainz answer
+        to, rule, why, rec = None, None, f"{type(e).__name__}: {e}", None
+    if not rec:
+        return {"from": src, "to": None, "rule": None, "why": f"kept the match: {why}"}
+    row.update(from_recording(d, rec))
+    row["method"] += ">work"
+    return {"from": src, "to": row["mbid"], "rule": rule, "why": why}
+
+
 def resolve(d):
-    """Proposal dict with status auto | review | nomatch."""
+    """Proposal dict with status auto | review | nomatch. A video or DJ-mix match is swapped to the audio recording
+    of the same song when one is found; row["swap"] is the evidence (from, to, rule, why)."""
     ranked = decide(d)
     row = {"ytid": d["ytid"], "channel": d["channel"], "yt_title": d["yt_title"], "duration": round(d["duration"]),
            "mbid": "", "artist": "", "title": "", "artist_mbids": [], "score": 0, "runner_up": 0, "method": "", "status": "",
@@ -382,19 +404,25 @@ def resolve(d):
             rec = mb_recording(mbid)
             if rec:
                 row.update(from_recording(d, rec))
+    from . import years
     video = re.compile(r"\s*[\(\[][^\(\[]*\b(clip|video|videoclip|MV)\b[^\)\]]*[\)\]]\s*$", re.I)
-    if row["mbid"] and (row.get("video") or video.search(row["title"])):
-        # MB "video" recording (e.g. from the YouTube URL rel; flagged, or "(video)" in the title) -> prefer the
-        # audio recording of the same song: a video's first release is often a later video compilation
-        base = video.sub("", row["title"])
+    if row["mbid"] and (row.get("video") or video.search(row["title"]) or years.dj_mix(row)):
+        # MB "video" recording (e.g. from the YouTube URL rel; flagged, or "(video)" in the title) or a DJ-mix
+        # segment -> prefer the audio recording of the same song: a video's first release is often a later video
+        # compilation. First an audio alternative among the candidates, else the work's same-length recording.
+        base, src = video.sub("", row["title"]), row["mbid"]
         for alt in row["alternatives"]:
             rec = mb_recording(alt["mbid"])
-            if rec and not rec.get("video") and not video.search(rec["title"]) and sim(base, rec["title"]) >= 0.9:
+            if rec and not rec.get("video") and not video.search(rec["title"]) and not years.dj_mix(rec) \
+                    and sim(base, rec["title"]) >= 0.9:
                 alt_row = from_recording(d, rec)
                 if sim(alt_row["artist"], row["artist"]) >= 0.8:
                     row.update(alt_row)
                     row["method"] += ">audio"
+                    row["swap"] = {"from": src, "to": row["mbid"], "rule": "alternative"}
                     break
+        else:
+            row["swap"] = swap_through_work(d, row)
     if row["mbid"] and d["provided"]:
         # official "Topic" upload: its artist list is authoritative
         pa = d["provided"]["artists"]
