@@ -219,6 +219,25 @@ def test_replaced_queue_drops_the_gone_nominee_and_starts_a_round():
     assert sh.round["source"] == "hits:80s" and sh.round["heard"] == ["x"]
 
 
+def test_play_rules_hash_keys_the_round_and_the_off_source_song_stays_out():
+    src = {"kind": "hits", "name": "80s", "len": 2, "files": ["b", "c"], "rules_hash": "h1"}
+    d, mpd, sh = setup(files=("a", "b", "c"), data={"b": heard(3), "c": heard(3)}, source=src)
+    # "a" played when the source was applied: it plays on, outside the round
+    assert sh.round["source"] == "hits:h1" and sh.round["heard"] == [] and sh.round["total"] == 2
+    play(d, mpd, "b")
+    assert sh.round["heard"] == ["b"]
+    # Apply of the same rules (another snapshot of them) keeps the round
+    player.write_state("source", {"source": {**src, "len": 3}})
+    asyncio.run(d.step({"playlist"}))
+    assert sh.round["source"] == "hits:h1" and sh.round["heard"] == ["b"]
+    # other rules under the same name start a new round, its total known before the full plan draws again
+    player.write_state("source", {"source": {**src, "rules_hash": "h2", "files": ["b"]}})
+    asyncio.run(d.step({"player"}))
+    assert sh.round["source"] == "hits:h2" and sh.round["heard"] == [] and sh.round["total"] == 1
+    play(d, mpd, "a")
+    assert "a" not in sh.round["heard"]
+
+
 def test_new_weights_drop_live_outcomes_they_cover(clock):
     d, mpd, sh = setup(data={"b": heard(3), "c": heard(3)})
     play(d, mpd, "b")

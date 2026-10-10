@@ -21,6 +21,8 @@ The next PLAN_N songs are drawn ahead (the plan, in play order) and published as
 Up next requests, so MPD itself plays them in order; rormpc shows the plan in its ShuffleNext column and Shuffle view. A planned song leaves the plan when it plays, leaves the queue, is asked for with Play next, gets
 "heard enough" or is played by hand; its lane goes back for its replacement, and the plan is topped up at the end. When the source is a Hits result (rormpc's source.json kind
 "hits"), a round plays each song once (hard rule); when all were heard it stops and says so; `shuffle newround`.
+The round's key is source.json's `rules_hash` (rormpc's Play: the same rules keep the round, other rules start a
+new one), else its name; the song playing across the switch is outside the source's files and never in the round.
 Previous (`shuffle prev [CMD_ID]`, the media key through this daemon) walks back through the songs that really
 played (the trail, by queue id) and this mode never sends MPD `previous`. Each press goes one song further back from
 the cursor; a trail entry no longer in the queue is passed over; at the start of the trail nothing happens; the song
@@ -191,8 +193,17 @@ class Shuffle(Module):
         return bool(self.info(file).get("heard")) or bool(self.live_times(file, "finished"))
 
     def source_scope(self):
+        """(kind, key) of rormpc's source: rormpc's Play writes the canonical hash of the rules it applied
+        (`rules_hash`), so the same rules keep their round and other rules start a new one even under the same
+        name; older sources (Hits' "Play these") have only their name."""
         src = (read_state("source") or {}).get("source") or {}
-        return src.get("kind"), src.get("name")
+        return src.get("kind"), src.get("rules_hash") or src.get("name")
+
+    def round_members(self):
+        """The files of a Hits source's snapshot, or None (an older source.json: every queued song). The song that
+        was playing when the source was applied stays outside it (off-source) and never counts in the round."""
+        files = ((read_state("source") or {}).get("source") or {}).get("files")
+        return set(files) if files else None
 
     def source_key(self):
         kind, name = self.source_scope()
@@ -315,7 +326,7 @@ class Shuffle(Module):
                 and s["file"] not in left_back]
         if self.round:
             # only the Hits snapshot: a song that was playing when the source was switched is not part of it
-            members = set((read_state("source") or {}).get("source", {}).get("files") or [s["file"] for s in q])
+            members = self.round_members() or {s["file"] for s in q}
             self.round["total"] = len(members)
             base = [s for s in base if s["file"] not in in_round and s["file"] in members]  # each once per round
             if not base and not self.plan:
@@ -398,7 +409,9 @@ class Shuffle(Module):
         if not key:
             self.round = None
         elif not self.round or self.round.get("source") != key:
-            self.round = {"source": key, "heard": [], "total": 0, "done": False}
+            # the total is known now when the source lists its files (a full plan may not draw again for a while)
+            members = self.round_members()
+            self.round = {"source": key, "heard": [], "total": len(members) if members else 0, "done": False}
         return source_changed
 
     # ------------------------------------------------------------ watching playback
@@ -483,8 +496,9 @@ class Shuffle(Module):
                         "last": now, "running": s.get("state") == "play", "origin": origin,
                         "duration": float(s.get("duration", 0) or cur.get("duration", 0) or 0)}
         self.recent = [f for f in self.recent if f != file][-(RECENT_MAX - 1):] + [file]
-        if self.round and file not in self.round["heard"]:
-            self.round["heard"].append(file)
+        members = self.round_members() if self.round else None
+        if self.round and file not in self.round["heard"] and (members is None or file in members):
+            self.round["heard"].append(file)  # an off-source song (playing across an Apply) is not in the round
 
     async def on_status(self, d, s, changed):
         dirty = self.ensure_round()
