@@ -29,6 +29,7 @@
   musicdb lyrics --help             # lyrics from LRCLIB into lyrics_dir (rmpc's Lyrics pane)
   musicdb deletions [--json [--all]] [--retry]  # the deletion journal (--all adds finished permanent deletions);
                                                 # --retry runs failed remote steps (update does it)
+  musicdb deletions allow|block ID      # a deleted song may be downloaded again / is blocked again (deleted.py)
   musicdb top [-n 30]                   # most played library songs
   musicdb skips [-n 30]                 # songs skipped most since their last play
   musicdb missing [-n 50]               # played / liked songs that are not in the library (yt-mp3-mb candidates)
@@ -869,6 +870,8 @@ def lb_playlists(a):
     if not newest:
         print(f"ListenBrainz has no recommendation playlists for {user} yet"); return
     lib = library()
+    from . import deleted
+    blocks = deleted.Blocks()
     for kind, pl in sorted(newest.items()):
         full = mbtag.http(mbtag.lb_api(f"/1/playlist/{pl['identifier'].rsplit('/', 1)[-1]}"),
                           host_interval=0.5, strict=True)["playlist"]
@@ -876,14 +879,15 @@ def lb_playlists(a):
         for t in full.get("track", []):
             mbid = next((i.rsplit("/", 1)[-1] for i in t.get("identifier", []) if "/recording/" in i), None)
             f, _ = match(lib, None, mbid, t.get("creator"), t.get("title"))
-            (have if f else missing).append(f or f"{t.get('creator')} - {t.get('title')}")
+            gone = None if f else blocks.chart_row(mbid, t.get("creator"), t.get("title"))
+            (have if f else missing).append(f or (f"{t.get('creator')} - {t.get('title')}", gone))
         name = "LB " + kind.replace("-", " ").title()  # stable name: replaced each time, not one per week
         PLAYLISTS.mkdir(parents=True, exist_ok=True)
         (PLAYLISTS / f"{name}.m3u").write_text("".join(f + "\n" for f in have))
         print(f"{name}: {len(have)}/{len(have) + len(missing)} in library ({pl['title']})")
-        for m in missing[: a.n]:
-            print(f"   missing: {m}")
-            if a.download:
+        for m, gone in missing[: a.n]:
+            print(f"   missing: {m}" + (f" ({deleted.reason(gone)})" if gone else ""))
+            if a.download and not gone:
                 subprocess.run([sys.executable, "-m", "rormpc_tools.yt_mp3_mb", "--yes", "-d", "LB",
                                 f"ytsearch1:{m} official audio", "--", "--no-playlist"])
 
@@ -1125,7 +1129,8 @@ def notify(text, subtitle=""):
 
 def undo(a):
     """Restore the most recently trashed song (repeat to go further back), or the one with --id, with its
-    stickers. Deleted listens and playlist entries stay deleted."""
+    stickers. Deleted listens and playlist entries stay deleted. Its journal record goes, and with it the block that
+    kept downloaders from fetching the song again (deleted.py)."""
     with journal_lock():
         pending = jsonl(PENDING)
         trashed = [r for r in pending if r.get("mode", "trash") == "trash" and r.get("trashed_to")
@@ -1194,8 +1199,18 @@ def deletions(a):
         return
     rows = [{"id": r["id"], "file": r["file"], "mode": r.get("mode", "trash"), "history": r.get("history", "keep"),
              "queued_at": r["queued_at"], "ops": r.get("ops", {}), "error": r.get("error")} for r in jsonl(PENDING)]
+    if a.action:
+        if not a.id:
+            sys.exit(f"musicdb deletions {a.action} ID")
+        from . import deleted
+        deleted.log(a.action, a.id)
+        print(f"{a.id}: " + ("may be downloaded again" if a.action == "allow" else "never downloaded again"))
+        return
     if a.json and getattr(a, "all", False):
-        print(json.dumps([journal_row(r) for r in jsonl(PENDING) + jsonl(DONE)], ensure_ascii=False)); return
+        from . import deleted
+        ok = deleted.allowed()
+        print(json.dumps([journal_row(r) | {"download": block_row(deleted.entry(r), r["id"] in ok)}
+                          for r in jsonl(PENDING) + jsonl(DONE)], ensure_ascii=False)); return
     if a.json:
         print(json.dumps(rows, ensure_ascii=False)); return
     for x in rows:
@@ -1210,6 +1225,12 @@ def name_title(rel):
     if identity.ytid_from_name(rel) and len(parts) >= 4:
         return "--".join(parts[2:-2] or parts[1:-2]).replace("_", " ")
     return pathlib.Path(rel).stem
+
+
+def block_row(e, allowed):
+    """How a deletion gates the downloaders, for the Deleted pane: "blocked" or "allowed", and what it matches."""
+    return {"state": "allowed" if allowed else "blocked", "ytid": e["ytid"], "mbid": e["mbid"],
+            "chart_key": e["chart_key"]}
 
 
 def journal_row(r):
@@ -1302,6 +1323,9 @@ def main():
         p = sp.add_parser(verb, help="(un)mark songs as not deletion candidates (Not finished)")
         p.add_argument("files", nargs="*"); p.set_defaults(fn=keep_cmd, cmd=verb)
     p = sp.add_parser("deletions"); p.add_argument("--retry", action="store_true")
+    p.add_argument("action", nargs="?", choices=("allow", "block"),
+                   help="allow: the deleted song may be downloaded again; block: never again (the default)")
+    p.add_argument("id", nargs="?", help="a journal id (musicdb deletions --json --all)")
     p.add_argument("--json", action="store_true")
     p.add_argument("--all", action="store_true", help="with --json: also finished permanent deletions")
     p.set_defaults(fn=deletions)

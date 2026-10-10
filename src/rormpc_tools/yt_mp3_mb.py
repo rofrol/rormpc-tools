@@ -6,12 +6,15 @@
   yt-mp3-mb --batch --json URL       # for programs: no questions, one JSON report on stdout (below)
   yt-mp3-mb --retag FILE.mp3 ...     # only identify + retag already downloaded files
   yt-mp3-mb URL -- --playlist-items 1-5   # extra args after -- go to yt-dlp
+  yt-mp3-mb --allow-deleted URL      # also videos / recordings deleted with `musicdb delete` (skipped otherwise)
 
 Music dir: music_dir in the settings ($YTMB_MUSIC_DIR). Needs: yt-dlp, ffmpeg; optional: fpcalc (AcoustID),
 mpc, listenbrainz-mpd config or $LISTENBRAINZ_TOKEN (better matching).
 File name: NNN--Artist--Title--youtubeID--uploaddate.mp3 (NNN = playlist index, omitted for singles).
 Cover: Cover Art Archive front of the earliest official release, else the YouTube thumbnail cropped to a square.
 Uncertain matches are asked about interactively; decisions are logged to ~/.cache/ytmb/log.jsonl.
+Deleted songs (deleted.py) are not downloaded again: a deleted video is skipped before the download, and a download
+identified as a deleted recording is asked about (kept only on "y"), or dropped without a question (--yes, --batch).
 
 --batch never asks: an uncertain match is not guessed but kept as "needs review": the file is saved with cleaned
 names and no MBID, and its proposal (MusicBrainz candidates) is reported. Videos whose file is already in the
@@ -20,11 +23,12 @@ target dir (by YouTube id in the name) are not downloaded again, so a rerun afte
   {"files": [{"path", "ytid", "status" auto|review|nomatch, "artist", "title", "mbid"}],
    "needs_review": [{"path", "ytid", "proposal": {"artist", "title", "mbid", "score", "method", "alternatives"}}],
    "skipped": [ytid already in the target dir], "failed": [{"ytid", "error"}] (identifying or tagging failed),
+   "blocked": [{"ytid", "reason", "deleted": {"id", "deleted_at", "file"}}] (deleted before; not in "files"),
    "error": null | "yt-dlp failed (1)"}  (exit status 1 with an error)
 """
 import argparse, json, pathlib, re, shutil, subprocess, sys, tempfile
 
-from . import external, identity, mbtag, settings
+from . import deleted, external, identity, mbtag, settings
 
 MUSIC = settings.MUSIC_DIR
 LOG = mbtag.CACHE / "log.jsonl"
@@ -105,12 +109,20 @@ def proposal(row):
     return {k: row[k] for k in ("artist", "title", "mbid", "score", "method", "alternatives")}
 
 
-def process(path, info, target, yes, batch=False):
+def process(path, info, target, yes, batch=False, blocks=None):
     """Identify, tag and name one downloaded file and move it into target. Returns the --json file entry
-    ({"path", "ytid", "status", "artist", "title", "mbid"}, plus "proposal" for a match left for review)."""
+    ({"path", "ytid", "status", "artist", "title", "mbid"}, plus "proposal" for a match left for review), or
+    {"ytid", "status": "blocked", "reason", "deleted"} for a deleted recording that was not kept (file removed)."""
     d = mbtag.collect(path, info["id"], info.get("channel") or info.get("uploader") or "", info.get("title") or "",
                       info.get("description"), float(info.get("duration") or 0), info.get("artist"), info.get("track"))
     row = mbtag.resolve(d)
+    if blocks and (e := blocks.recording(row["mbid"])):
+        why = f"{row['artist']} - {row['title']}: {deleted.reason(e)}"
+        keep = not batch and not yes and sys.stdin.isatty() and input(f"\n?  {why}\n   keep it anyway? [y/N] ").strip().lower() == "y"
+        if not keep:
+            pathlib.Path(path).unlink(missing_ok=True)
+            print(f"⌫ not kept: {why}", file=sys.stderr)
+            return {"ytid": info["id"], "status": "blocked", "reason": deleted.reason(e), "deleted": deleted.mark(e)}
     review = None
     if row["status"] != "auto" and batch:
         # not guessed: names only, and the proposal goes to the caller
@@ -193,24 +205,33 @@ def planned(urls, dir_arg):
     return targets, ids
 
 
-def batch(urls, dir_arg=None, extra=(), known=None):
+def batch(urls, dir_arg=None, extra=(), known=None, allow_deleted=False):
     """--batch: download, identify and file without a question; returns the --json report. known: (targets, ids)
-    when the caller already knows them (skips the listing)."""
+    when the caller already knows them (skips the listing). Deleted videos are not downloaded, a deleted recording
+    is not kept (both in "blocked"), unless allow_deleted."""
     targets, ids = known if known is not None else planned(urls, dir_arg)
     skip = set().union(*(present_ids(t) for t in targets)) & ids
-    report = {"files": [], "needs_review": [], "skipped": sorted(skip), "failed": [], "error": None}
-    if ids and ids <= skip:
+    blocks = None if allow_deleted else deleted.Blocks()
+    gone = {y: e for y in ids - skip if blocks and (e := blocks.video(y))}
+    report = {"files": [], "needs_review": [], "skipped": sorted(skip), "failed": [], "error": None,
+              "blocked": [{"ytid": y, "reason": deleted.reason(e), "deleted": deleted.mark(e)} for y, e in sorted(gone.items())]}
+    for b in report["blocked"]:
+        print(f"⌫ {b['ytid']}: {b['reason']}", file=sys.stderr)
+    if ids and ids <= skip | set(gone):
         return report
     try:
-        infos = download(list(urls), list(extra), skip)
+        infos = download(list(urls), list(extra), skip | set(blocks.ytid if blocks else ()))
     except SystemExit as e:  # download exits when yt-dlp produced nothing
         report["error"] = str(e.code)
         return report
     for info in infos:
         try:
-            entry = process(info["filepath"], info, target_of(info, dir_arg), yes=True, batch=True)
+            entry = process(info["filepath"], info, target_of(info, dir_arg), yes=True, batch=True, blocks=blocks)
         except Exception as e:  # one bad file must not lose the report of the others
             report["failed"].append({"ytid": info.get("id"), "error": f"{type(e).__name__}: {e}"})
+            continue
+        if entry["status"] == "blocked":
+            report["blocked"].append({k: entry[k] for k in ("ytid", "reason", "deleted")})
             continue
         review = entry.pop("proposal", None)
         report["files"].append(entry)
@@ -228,6 +249,8 @@ def main():
     ap.add_argument("--batch", action="store_true", help="never ask; uncertain matches are left for review")
     ap.add_argument("--json", action="store_true", help="one JSON report on stdout (with --batch)")
     ap.add_argument("--retag", nargs="+", metavar="FILE", help="retag existing yt-dlp mp3s instead of downloading")
+    ap.add_argument("--allow-deleted", action="store_true",
+                    help="download videos and recordings deleted with `musicdb delete` too (skipped otherwise)")
     argv = sys.argv[1:]
     extra = argv[argv.index("--") + 1:] if "--" in argv else []
     a = ap.parse_args(argv[: argv.index("--")] if "--" in argv else argv)
@@ -255,7 +278,7 @@ def main():
     if a.json and not a.batch:
         ap.error("--json needs --batch")
     if a.batch:
-        report = batch(a.urls, a.dir, extra)
+        report = batch(a.urls, a.dir, extra, allow_deleted=a.allow_deleted)
         if report["files"]:
             mpd_update()
         if a.json:
@@ -264,9 +287,14 @@ def main():
             for r in report["needs_review"]:
                 print(f"needs review: {r['path']}", file=sys.stderr)
         sys.exit(1 if report["error"] else 0)
-    infos = download(a.urls, extra)
+    blocks = None if a.allow_deleted else deleted.Blocks()
+    for url in a.urls:  # a playlist's deleted videos are skipped by yt-dlp's download archive below
+        m = re.search(r"(?:v=|youtu\.be/|shorts/)([\w-]{11})", url)
+        if m and blocks and (e := blocks.video(m.group(1))):
+            print(f"⌫ {m.group(1)}: {deleted.reason(e)}; or yt-mp3-mb --allow-deleted", file=sys.stderr)
+    infos = download(a.urls, extra, set(blocks.ytid) if blocks else ())
     for info in infos:
-        process(info["filepath"], info, target_of(info, a.dir), a.yes)
+        process(info["filepath"], info, target_of(info, a.dir), a.yes, blocks=blocks)
     mpd_update()
 
 

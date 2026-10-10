@@ -39,7 +39,7 @@ Caches: ~/.cache/hits/.
 """
 import argparse, collections, datetime as dt, json, os, pathlib, re, subprocess, sys, time, urllib.parse, urllib.request
 
-from . import external, hits_exceptions, hits_rules, hits_sets, mbtag, musicdb, settings
+from . import deleted, external, hits_exceptions, hits_rules, hits_sets, mbtag, musicdb, settings
 
 
 CACHE = pathlib.Path(os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")) / "hits"
@@ -819,6 +819,7 @@ def _show(a):
     a.pinned = a.excluded = 0
     genre_ok, artist_ok = genre_filter(a.genre), artist_filter(a.artist)
     exceptions = hits_exceptions.active()
+    blocks = deleted.Blocks()
     for gi, (d, years) in enumerate(groups):
         cands, members = candidates(years, a, lib, plays, last)
         # hides are exclusions now: select keeps them, the exceptions below take them out after the Top % cut
@@ -839,6 +840,9 @@ def _show(a):
         # the artist picker lists the artists of the whole selection before the Top % cut
         for k, (name, n) in count_artists(info["pool"]).items():
             a.cohort_artists.setdefault(k, [name, 0])[1] += n
+        for s in part:  # a missing song deleted before is shown as deleted, never offered for download as missing
+            e = None if s["file"] else blocks.chart_row(s.get("mbid"), s["artist"], s["title"])
+            s["deleted"] = deleted.mark(e) if e else None
         if len(groups) > 1:
             print(f"\n## {d}: {sum(1 for s in part if s['file'])}/{len(part)} in library")
         print_rows(part, plays, a)
@@ -855,7 +859,9 @@ def _show(a):
         print(f"playlist: {p.stem} ({len(have)} songs)")
     if a.download:
         missing = [s for s in rows if not s["file"]]
-        for s in missing:
+        for s in [s for s in missing if s["deleted"]]:
+            print(f"\n--- {s['artist']} - {s['title']}: {deleted.reason(blocks.chart_row(s.get('mbid'), s['artist'], s['title']))}")
+        for s in [s for s in missing if not s["deleted"]]:
             q = f"ytsearch1:{main_artist(s['artist'])} - {s['title']} official audio"
             print(f"\n==> {s['artist']} - {s['title']}")
             year = min(s["chart_years"], default=s.get("release") or 0)
@@ -949,7 +955,8 @@ def write_json(a, label, rows, plays):
     """Versioned result file for rormpc's Hits pane, written atomically (the pane may read it any time). Version
     1 gained fields only: "rules", "formula", "summary", "counts", args.sets/years_of, rows' "ranked" and "sets";
     then (exceptions) counts.pinned/excluded, args.show_excluded, rows' "pinned", "excluded", "exceptions",
-    "song_id" and "chart_key"; then (smart lists) args.open_list and args.open_list_name; then (named sets)
+    "song_id" and "chart_key"; then rows' "deleted" ({id, deleted_at, file} of a missing song deleted before, else
+    null: not to be downloaded again, deleted.py); then (smart lists) args.open_list and args.open_list_name; then (named sets)
     args.set_names {"tag:God": "Tag God", "list:ID": "Smart 80s party", ...}
     (rormpc's hits.rs parses a copy of this shape in its tests; tests/test_rormpc_contract.py checks this side)."""
     r = a.rules
@@ -979,7 +986,7 @@ def write_json(a, label, rows, plays):
                      "exceptions": [{k: e.get(k) for k in ("id", "action", "scope", "applies", "via")}
                                     for e in s.get("exceptions", [])],
                      "song_id": hits_exceptions.id_of_file(s["file"]) if s["file"] else None,
-                     "chart_key": hide_key(s["artist"], s["title"])} for s in rows]}
+                     "chart_key": hide_key(s["artist"], s["title"]), "deleted": s.get("deleted")} for s in rows]}
     path = pathlib.Path(a.json).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -1008,14 +1015,15 @@ def playlists_note(a):
 
 def print_rows(rows, plays, a):
     for s in rows:
-        have = "✓" if s["file"] else " "
+        have = "✓" if s["file"] else "⌫" if s.get("deleted") else " "
         k = plays.get(s["file"], 0) if s["file"] else 0
         score = f"{s.get('listens', 0):>9,}" if a.rules.order == "listens" else f"{s.get('peak', s.get('plays', 0)):>4}"
         g = ", ".join(genres(s)[:3])
         rank = f"{s['rank']:4d}." if s["ranked"] else "   —."
         flag = "⊘" if s.get("excluded") else "✚" if s.get("pinned") else " "
         print(f"{rank}{flag}{have} {k or '':>4} {score}  {s['artist']} - {s['title']}  ({min(row_years(s), default='?')}; {g})"
-              + (f"  [{s['reason']}]" if s.get("reason") else ""))
+              + (f"  [{s['reason']}]" if s.get("reason") else "")
+              + (f"  [deleted {s['deleted']['deleted_at'][:10]}]" if s.get("deleted") else ""))
 
 
 def prefetch(a):

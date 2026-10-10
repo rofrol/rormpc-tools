@@ -6,7 +6,7 @@
   hits fetch accept KEY ...     # move reviewed files into the library with their current tags
   hits fetch accept --as-chart KEY ...   # the same, tagged with the chart's artist and title (no MBID)
   hits fetch reject KEY ...     # delete reviewed files, never fetch that song again
-  hits fetch retry KEY ...      # failed or rejected items back to the queue
+  hits fetch retry KEY ...      # failed, rejected or blocked items back to the queue
   hits fetch another KEY ...    # reject this download's video and try the next search result
   hits fetch cancel             # the worker stops after the current song; queued items stay queued
   hits fetch clear              # forget songs already in the library (rejected ones stay, so they never return)
@@ -19,14 +19,17 @@ waits in review with the reason ("other recording of the same song", "different 
 never changed to force agreement; `accept --as-chart` is the person's decision that the file is the chart song: it
 writes the chart's artist and title (Hits then matches it by name) and keeps the YouTube channel, video title and
 URL in a comment, never the chart's recording MBID. A rejected video id is stored on the item, and `retry` /
-`another` take the next search result that was not rejected. Between songs the worker sleeps 8-20 s; it stops after 3 failures in a row or
+`another` take the next search result that was not rejected. A song deleted with `musicdb delete` is never fetched
+again (deleted.py): `add` leaves it out, the worker marks a queued one "blocked" with the date before searching,
+skips deleted videos among the search results, and a download identified as a deleted recording waits in review.
+`musicdb deletions allow ID`, then `retry`, fetches it after all. Between songs the worker sleeps 8-20 s; it stops after 3 failures in a row or
 when YouTube answers 429.
 
 State: $XDG_STATE_HOME/rormpc-tools/fetch/queue.json (written atomically; rormpc reads it), staged files next to it.
 """
 import argparse, contextlib, datetime as dt, fcntl, json, os, pathlib, random, re, shutil, subprocess, sys, time
 
-from . import mbtag, settings, yt_mp3_mb
+from . import deleted, mbtag, settings, yt_mp3_mb
 
 STATE_DIR = pathlib.Path(os.environ.get("XDG_STATE_HOME", settings.HOME / ".local/state")) / "rormpc-tools/fetch"
 QUEUE = STATE_DIR / "queue.json"
@@ -39,7 +42,7 @@ DURATION_SLACK = 5  # seconds between the chart recording and a YouTube candidat
 MAX_FAILURES = 3
 VERSION = re.compile(r"\b(live|remix|cover|sped[ -]?up|slowed|reverb|karaoke|nightcore|instrumental|8d|"
                      r"extended|acoustic|lyrics? video|mashup|loop|1 hour|hour version)\b", re.I)
-STATES = ("queued", "searching", "downloading", "verifying", "ok", "review", "failed", "rejected")
+STATES = ("queued", "searching", "downloading", "verifying", "ok", "review", "failed", "rejected", "blocked")
 
 
 def now():
@@ -112,6 +115,9 @@ def add(a):
         missing = [r for r in missing if r["rank"] in set(a.rank)]
     if a.first:
         missing = missing[: a.first]
+    blocks = deleted.Blocks()
+    gone = [r for r in missing if r.get("deleted") or blocks.chart_row(r.get("mbid"), r["artist"], r["title"])]
+    missing = [r for r in missing if r not in gone]
     added = 0
     with locked():
         q = load()
@@ -125,7 +131,8 @@ def add(a):
             known.add(key)
             added += 1
         save(q)
-    print(f"queued {added} of {len(missing)} missing songs" + (f" ({len(missing) - added} already known)" if len(missing) > added else ""))
+    print(f"queued {added} of {len(missing)} missing songs" + (f" ({len(missing) - added} already known)" if len(missing) > added else "")
+          + (f"; {len(gone)} deleted songs left out" if gone else ""))
 
 
 def chart_length(mbid):
@@ -170,8 +177,11 @@ def candidates(item):
     return sorted(out, key=lambda x: -x[0]), length, nearest
 
 
-def verify(item, row):
-    """'ok' only for the chart's own recording; otherwise review with a reason."""
+def verify(item, row, blocks=None):
+    """'ok' only for the chart's own recording; otherwise review with a reason. A deleted recording always waits
+    for review."""
+    if blocks and (e := blocks.recording(row["mbid"])):
+        return "review", f"deleted before: {row['artist']} - {row['title']}, {deleted.reason(e)}"
     if item.get("mbid") and row["mbid"] == item["mbid"]:
         return "ok", "same recording as the chart entry"
     if not row["mbid"]:
@@ -189,13 +199,18 @@ def target_dir(item):
 def fetch_one(item):
     """Search, download into staging, identify; returns the fields to store on the item."""
     key = item["key"]
+    blocks = deleted.Blocks()  # read per song: a deletion or an allow made while the worker runs counts
+    if e := blocks.chart_row(item.get("mbid"), item["artist"], item["title"]):
+        return {"state": "blocked", "reason": deleted.reason(e), "deleted": deleted.mark(e), "error": None}
     update(key, state="searching", error=None)
     found, length, nearest = candidates(item)
     rejected = set(item.get("rejected_ids") or [])
-    fresh = [c for c in found if c[1].get("id") not in rejected]
+    fresh = [c for c in found if c[1].get("id") not in rejected and not blocks.video(c[1].get("id"))]
     if found and not fresh:
+        gone = sum(1 for c in found if blocks.video(c[1].get("id")))
         return {"state": "failed", "chart_length": length,
-                "error": f"no other YouTube candidate: all {len(found)} were rejected before"}
+                "error": f"no other YouTube candidate: all {len(found)} were rejected before"
+                + (f" ({gone} of them deleted from the library)" if gone else "")}
     if not found:
         return {"state": "failed", "chart_length": length,
                 "error": f"no YouTube upload within {DURATION_SLACK} s of the chart recording"
@@ -223,7 +238,7 @@ def fetch_one(item):
     except Exception as e:  # a missing cover must not lose the download
         print(f"  cover failed: {e}", file=sys.stderr)
     name = f"{yt_mp3_mb.safe(row['artist'], 60)}--{yt_mp3_mb.safe(row['title'])}--{info['id']}--{info.get('upload_date') or ''}.mp3"
-    state, reason = verify(item, row)
+    state, reason = verify(item, row, blocks)
     STAGING.mkdir(parents=True, exist_ok=True)
     dest = (target_dir(item) if state == "ok" else STAGING) / name
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -246,7 +261,7 @@ def run(_a):
             if it["state"] in ("searching", "downloading", "verifying"):
                 it["state"] = "queued"
         save(q)
-    failures, failed, done, arrived, first = 0, 0, 0, 0, True
+    failures, failed, done, arrived, blocked, asked = 0, 0, 0, 0, 0, False
     while True:
         if CANCEL.exists():
             CANCEL.unlink(missing_ok=True)
@@ -255,15 +270,15 @@ def run(_a):
         item = next((it for it in load()["items"] if it["state"] == "queued"), None)
         if not item:
             break
-        if not first:
+        if asked:  # only after a YouTube request: a blocked song asks YouTube nothing
             time.sleep(random.uniform(8, 20))  # external rate limit: YouTube blocks bursts of searches/downloads
-        first = False
         print(f"==> {item['artist']} - {item['title']}", flush=True)
         try:
             fields = fetch_one(item)
         except (Exception, SystemExit) as e:  # yt_mp3_mb.download exits when yt-dlp fails
             fields = {"state": "failed", "error": str(e)}
         update(item["key"], **fields)
+        asked = fields["state"] != "blocked"
         print(f"    {fields['state']}: {fields.get('reason') or fields.get('error') or ''}", flush=True)
         if fields["state"] == "failed":
             failures += 1
@@ -274,6 +289,8 @@ def run(_a):
             if failures >= MAX_FAILURES:
                 print(f"{MAX_FAILURES} failures in a row: stopping", file=sys.stderr)
                 break
+        elif fields["state"] == "blocked":
+            blocked += 1
         else:
             failures = 0
             done += 1
@@ -283,6 +300,7 @@ def run(_a):
     # the last line is what rormpc shows; it reruns hits unless "0 new"
     review = sum(1 for it in load()["items"] if it["state"] == "review")
     print(f"fetch: {arrived} new in the library, {done - arrived} to review, {failed} failed"
+          + (f", {blocked} deleted before (not fetched)" if blocked else "")
           + (f" · {review} waiting for review" if review else ""))
 
 
@@ -375,8 +393,8 @@ def decide(a, verb):
             if it["key"] not in a.keys:
                 continue
             what = f"{it['artist']} - {it['title']}"
-            if verb == "retry" and it["state"] in ("failed", "rejected"):
-                it.update(state="queued", error=None, changed_at=now())
+            if verb == "retry" and it["state"] in ("failed", "rejected", "blocked"):
+                it.update(state="queued", error=None, reason=None, deleted=None, changed_at=now())
             elif verb == "another" and it["state"] in ("review", "failed", "rejected"):
                 if it["state"] == "review" and it.get("file"):
                     pathlib.Path(it["file"]).unlink(missing_ok=True)

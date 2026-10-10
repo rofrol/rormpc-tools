@@ -21,6 +21,9 @@ and, separately, a job state (queued / downloading / needs_match / ready / faile
   staging). A confident MusicBrainz match moves into the subscription's dir in the music dir (ready); anything
   else waits as needs_match with the proposal, outside the library, until you accept it as it is (names only, no
   MBID) or reject it.
+- A video deleted from the library with `musicdb delete` is never downloaded again (deleted.py): `check` marks it
+  ("deleted": {id, deleted_at, file}), the worker sets job "blocked" instead of downloading it, and a download
+  identified as a deleted recording is dropped (blocked too). `musicdb deletions allow ID`, then accept it again.
 - The MPD playlist (<name>.m3u in MPD's playlist directory, written atomically) holds the accepted, ready, still
   listed items in the playlist's order; file names carry no position.
 - Nothing deletes a file: a rejected or vanished item leaves the playlist, its file stays. A failed or partial
@@ -32,7 +35,7 @@ command: ~/.cache/rormpc-tools/liveplaylist/status.json (atomic), its log next t
 import argparse, contextlib, datetime as dt, fcntl, json, os, pathlib, random, re, shutil, signal, subprocess, sys
 import time, urllib.parse
 
-from . import external, identity, mbtag, settings, yt_mp3_mb
+from . import deleted, external, identity, mbtag, settings, yt_mp3_mb
 
 SCHEMA = 1
 MUSIC = settings.MUSIC_DIR
@@ -42,7 +45,7 @@ CACHE = settings.XDG_CACHE / "rormpc-tools" / "liveplaylist"
 PAUSE = (3, 8)  # seconds between downloads: external rate limit, YouTube blocks bursts
 MAX_FAILURES = 3
 DECISIONS = ("pending", "accepted", "rejected")
-JOBS = ("queued", "downloading", "needs_match", "ready", "failed")
+JOBS = ("queued", "downloading", "needs_match", "ready", "failed", "blocked")
 UNAVAILABLE = re.compile(r"^\[(deleted|private) video\]$", re.I)
 
 
@@ -217,6 +220,7 @@ def check_one(sid):
         error = None
     except RuntimeError as e:
         info, error = None, str(e)
+    blocks = deleted.Blocks()
     with locked():
         sub = load(sid)
         result = {"id": sid, "ok": False, "new": [], "back": [], "gone": [], "partial": False, "error": error}
@@ -225,6 +229,9 @@ def check_one(sid):
                 result.update(merge(sub, info), ok=True)
             except RuntimeError as e:
                 result["error"] = str(e)
+        for it in sub["items"].values():  # shown in the review, before anyone accepts a deleted song
+            e = blocks.video(it["ytid"])
+            it["deleted"] = deleted.mark(e) if e else None
         sub["last_check"] = {"at": now(), "ok": result["ok"], "error": result["error"], "partial": result["partial"],
                              "new": len(result["new"])}
         save(sub)
@@ -288,7 +295,7 @@ def cmd_accept(a):
                 # accepted as it is: names only, no MBID
                 it.update(job="ready", path=promote(sub, it), error=None, review=None)
                 changed["ready"].append(yid)
-            elif it.get("job") in (None, "failed"):
+            elif it.get("job") in (None, "failed", "blocked"):
                 it.update(job="queued", error=None)
                 changed["queued"].append(yid)
             else:
@@ -404,6 +411,8 @@ def fetch_item(sub, it):
     found = in_library(yid)
     if found:
         return {"job": "ready", "path": found[0], "source": "library", "match": found[1], "error": None}
+    if e := deleted.Blocks().video(yid):
+        return {"job": "blocked", "error": deleted.reason(e), "deleted": deleted.mark(e)}
     target = MUSIC / sub["dir"]
     if (f := file_with(target, yid)):  # moved in before an interruption
         return {"job": "ready", "path": str(f.relative_to(MUSIC)), "source": "download", "error": None}
@@ -414,6 +423,8 @@ def fetch_item(sub, it):
     report = yt_mp3_mb.batch([f"https://www.youtube.com/watch?v={yid}"], str(stage), ["--no-playlist"],
                              known=({stage}, {yid}))
     entry = next((f for f in report["files"] if f["ytid"] == yid), None)
+    if entry is None and (b := next((b for b in report.get("blocked", []) if b["ytid"] == yid), None)):
+        return {"job": "blocked", "error": b["reason"], "deleted": b["deleted"], "source": "download"}
     if entry is None:
         err = report["error"] or next((f["error"] for f in report["failed"] if f["ytid"] == yid), None)
         return {"job": "failed", "error": err or "yt-dlp produced no file"}
@@ -485,7 +496,8 @@ def download(ids=None):
                 fields = {"job": "failed", "error": f"{type(e).__name__}: {e}"}
             update_item(sid, yid, **fields)
             current = None
-            fetched = fields.get("source") != "library"
+            # a library reference and a video blocked before its download ask YouTube nothing
+            fetched = fields.get("source") != "library" and not (fields["job"] == "blocked" and not fields.get("source"))
             log(sid, ytid=yid, **{k: v for k, v in fields.items() if k != "review"})
             say(f"    {fields['job']}" + (f": {fields['error']}" if fields.get("error") else ""))
             if fields["job"] == "failed":

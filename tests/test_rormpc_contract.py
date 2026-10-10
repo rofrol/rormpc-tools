@@ -60,10 +60,11 @@ def test_hits_json_carries_the_rules_formula_and_counts(env, monkeypatch, tmp_pa
     [row] = data["rows"]
     assert set(row) == {"rank", "pct", "cohort", "ranked", "artist", "title", "year", "years", "points", "peak",
                         "listens", "sets", "genres", "mbid", "file", "hidden", "plays", "reason", "pinned",
-                        "excluded", "exceptions", "song_id", "chart_key"}
+                        "excluded", "exceptions", "song_id", "chart_key", "deleted"}
     assert (row["file"], row["rank"], row["cohort"], row["ranked"], row["sets"]) == (SONG["file"], 2, 2, True, [])  # "B" ranks first on the tie
     assert (row["pinned"], row["excluded"], row["exceptions"], row["song_id"]) == (False, False, [], None)
     assert row["chart_key"] == hits.hide_key(SONG["artist"], SONG["title"])
+    assert row["deleted"] is None
 
 
 def test_hits_refuses_top_without_a_rank(monkeypatch):

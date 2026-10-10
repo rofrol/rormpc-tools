@@ -146,6 +146,16 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   (ListenBrainz listens, YouTube playlist entries) goes only with `--listenbrainz`, and failed remote steps are
   retried by `musicdb update`. Deleted events become tombstones that re-imports skip. Listens of a recording that
   another library file still has are not deleted.
+- A deleted song is never downloaded again. The block list is derived from the deletion journal (every deletion,
+  Trash or permanent, the ones made before the block list existed included; `musicdb undo` lifts it with the
+  record), never kept apart from it. It matches the YouTube video exactly, in every downloader before anything is
+  downloaded; the recording MBID and the chart key (`hits.hide_key`) unless the delete found another library file
+  of the same recording. Chart keys gate only chart rows (Hits, `hits fetch`), never a URL someone gave. A download
+  identified afterwards as a deleted recording never enters the library on its own: review (`hits fetch`), blocked
+  (`liveplaylist`), dropped with the reason (`yt-mp3-mb`; a question when interactive). Hits rows carry
+  `"deleted"`, `hits fetch` items the state `blocked`, `yt-mp3-mb --json` a `"blocked"` list. A deliberate
+  re-download: `musicdb deletions allow ID` (`block ID` takes it back; `deletions/allowed.jsonl`, append-only), or
+  `yt-mp3-mb --allow-deleted` for one run.
 - `hits fetch` puts a download into the library only when its MusicBrainz recording is the chart's own; everything
   else waits in review outside the music dir. It never retags a file to make it agree on its own; `accept
   --as-chart` (the person's decision) writes the chart's artist and title and keeps the YouTube channel, video title
