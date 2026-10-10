@@ -164,12 +164,15 @@ def in_period(c, years_of, wanted):
 # ---------------------------------------------------------------- rank population
 
 def score(c, rules, wanted):
-    """The rank's score of a candidate (higher ranks first)."""
+    """The rank's score of a candidate (higher ranks first). My plays and rediscover count `mine`, the plays
+    without the weighted shuffle's own picks, with every Years of (hits.my_plays; `plays` when a caller gave no
+    `mine`)."""
     if rules.rank == "plays" and rules.years_of == "listened":
         return sum(n for y, n in (c.get("listened") or {}).items() if not wanted or y in wanted)
+    mine = c.get("mine", c.get("plays", 0))
     if rules.rank == "rediscover":
-        return math.log1p(c.get("plays", 0)) * min(c.get("idle_days", 3650), 365)
-    return c.get("plays", 0)
+        return math.log1p(mine) * min(c.get("idle_days", 3650), 365)
+    return mine
 
 
 def population(cands, rules, wanted):

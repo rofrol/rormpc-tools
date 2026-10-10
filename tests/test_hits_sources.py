@@ -2,6 +2,8 @@
 out), the whole library, likes and playlists (`--source` mapped onto --set/--rank/--years-of)."""
 import argparse
 
+import pytest
+
 from rormpc_tools import hits, hits_rules, musicdb
 
 
@@ -16,6 +18,12 @@ def args(source=None, sets=None, rank=None, years_of=None, **kw):
 def song(f):
     return {"artist": f.upper(), "title": f, "file": f, "year": 2010, "years": [2010], "mbid": None,
             "artist_mbid": None, "tags": [], "listens": 0, "hidden": False, "liked": f == "b"}
+
+
+def no_play_log(monkeypatch):
+    """No play timestamps and no shuffle picks: my plays are the given play counts."""
+    monkeypatch.setattr(musicdb, "counted", lambda c, lib, st=None: None)
+    monkeypatch.setattr(musicdb, "db", lambda: None)
 
 
 def run(a, plays=None, years=()):
@@ -39,7 +47,32 @@ def test_mine_ranks_by_plays_in_the_listening_years_without_the_shuffles_picks(m
     assert [r["file"] for r in run(args("mine", top="1-100"))] == ["a", "b"]
 
 
+@pytest.mark.parametrize("rank, years_of", [("plays", "release"), ("plays", "chart"), ("plays", "listened"),
+                                             ("rediscover", "release")])
+def test_my_plays_rank_leaves_out_the_shuffles_picks_with_every_years_of(monkeypatch, rank, years_of):
+    # a: 3 plays I chose; b: 4 plays, 2 of them started by the weighted shuffle, so my plays are 2
+    stamps = {"a": ["2016-03-01T10:00:00", "2016-04-01T10:00:00", "2016-05-01T10:00:00"],
+              "b": ["2016-03-02T10:00:00", "2016-04-02T10:00:00", "2016-05-02T10:00:00", "2016-06-02T10:00:00"]}
+    monkeypatch.setattr(musicdb, "counted", lambda c, lib, st=None: st.update(stamps))
+    monkeypatch.setattr(musicdb, "db", lambda: None)
+    picks = [musicdb.ts_epoch(t) - 10 for t in stamps["b"][2:]]
+    monkeypatch.setattr(musicdb, "auto_starts", lambda: {"b": picks})
+    monkeypatch.setattr(hits, "library_songs", lambda: {f: dict(song(f), year=2016) for f in "ab"})
+    # both songs charted in 2016 (Years of chart), matched to their library files
+    monkeypatch.setattr(hits, "entries", lambda years: {f: {"title": f, "artist": f.upper(), "points": 50, "peak": 50,
+                                                            "best": 51, "years": [2016], "year": 2016} for f in "ab"})
+    monkeypatch.setattr(hits, "mb_song", lambda title, artist, year: {})
+    monkeypatch.setattr(musicdb, "match", lambda lib, ytid, mbid, artist, title, **kw: (title, None))
+    monkeypatch.setattr(hits, "lb_popularity", lambda mbids, cached_only=False: {})
+    monkeypatch.setattr(hits, "hidden_set", set)
+    rows = run(args(rank=rank, years_of=years_of), {"a": 3, "b": 4}, years=[2016])
+    assert [r["file"] for r in rows] == ["a", "b"]  # b's 4 plays rank as 2: the shuffle's 2 picks don't count
+    if rank == "plays":
+        assert [r["score"] for r in rows] == [3, 2]
+
+
 def test_library_ranks_every_song_by_plays(monkeypatch):
+    no_play_log(monkeypatch)
     monkeypatch.setattr(hits, "library_songs", lambda: {"a": song("a"), "b": song("b"), "c": song("c")})
     rows = run(args("library"), {"a": 5, "c": 9})
     assert [r["file"] for r in rows] == ["c", "a", "b"]
@@ -79,6 +112,7 @@ def test_my_playlists_follows_merged_files(env):
 
 
 def test_playlists_set_ranks_owned_playlist_songs_by_plays_with_their_playlists_as_reason(monkeypatch, env):
+    no_play_log(monkeypatch)
     monkeypatch.setattr(hits, "library_songs", lambda: {f: song(f) for f in "abcd"})
     env().playlists = {"Road trip": ["a", "c"], "Evening": ["c", "zz-not-in-library"]}
     rows = run(args("playlists"), {"a": 5, "b": 50, "c": 9})

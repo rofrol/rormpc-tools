@@ -639,18 +639,33 @@ def chart_candidates(cands, members, years, a, lib, plays):
         c["listens"] = pop.get(c.get("mbid"), 0)
 
 
-def listened_years(cands, lib):
-    """Each library song's plays per listening year, the weighted shuffle's own picks left out (they show what
-    the algorithm chose, not me): candidate["listened"] = Counter({year: plays})."""
-    stamps = {}
-    musicdb.counted(musicdb.db(), lib, stamps)
-    auto = musicdb.auto_starts()
-    for f, ts_list in stamps.items():
-        if f not in cands:
-            continue
-        picks = auto.get(f, [])
-        cands[f]["listened"] = collections.Counter(
-            int(t[:4]) for t in ts_list if not any(p - 120 <= musicdb.ts_epoch(t) <= p + 1800 for p in picks))
+def shuffle_split(a, lib):
+    """Each library file's play timestamps split by who chose the song, gathered once per run: ({file: [ts] of my
+    own plays}, {file: number of plays the weighted shuffle picked itself}). The shuffle's picks show what the
+    algorithm chose, not me, so my plays leave them out with every Years of."""
+    if getattr(a, "own_plays", None) is None:
+        stamps = {}
+        musicdb.counted(musicdb.db(), lib, stamps)
+        auto, own, picked = musicdb.auto_starts(), {}, collections.Counter()
+        for f, ts_list in stamps.items():
+            picks = auto.get(f, [])
+            for t in ts_list:
+                if any(p - 120 <= musicdb.ts_epoch(t) <= p + 1800 for p in picks):
+                    picked[f] += 1
+                else:
+                    own.setdefault(f, []).append(t)
+        a.own_plays, a.shuffle_picks = own, picked
+    return a.own_plays, a.shuffle_picks
+
+
+def my_plays(cands, a, lib, plays):
+    """Each library candidate's plays without the shuffle's own picks: candidate["mine"] (the rank's count; the
+    Plays column keeps every play) and candidate["listened"] = Counter({listening year: my plays})."""
+    own, picked = shuffle_split(a, lib)
+    for f, c in cands.items():
+        if c.get("file") == f:
+            c["mine"] = max(0, plays.get(f, 0) - picked.get(f, 0))
+            c["listened"] = collections.Counter(int(t[:4]) for t in own.get(f, ()))
 
 
 def candidates(years, a, lib, plays, last):
@@ -675,10 +690,13 @@ def candidates(years, a, lib, plays, last):
             if f in cands:  # a stream or a file MPD no longer has is not a song to select
                 cands[f]["reason"] = playlists_reason(names)
                 members["playlists"].add(f)
-    if r.years_of == "listened":
-        listened_years(cands, lib)
+    mine = r.years_of == "listened" or r.rank in ("plays", "rediscover")
+    if mine:
+        my_plays(cands, a, lib, plays)
     if r.rank == "billboard" or "billboard" in members or r.years_of == "chart":
         chart_candidates(cands, members, years, a, lib, plays)
+        if mine:  # a chart row matched to a copy outside the library's songs
+            my_plays({k: c for k, c in cands.items() if "mine" not in c}, a, lib, plays)
     if "recommended" in members:
         for c in recs_candidates(a, lib, plays):
             cands[c["key"]] = c
@@ -915,9 +933,9 @@ def rank_note(a):
         note = (f"rank by my plays in these listening years ({a.mine_plays} plays"
                 + (": thin data, a ranking of few plays" if a.mine_plays < MINE_THIN else "") + ")")
     elif r.rank == "plays":
-        note = "rank by your plays among all library songs"
+        note = "rank by your plays among all library songs (the shuffle's own picks left out)"
     elif r.rank == "rediscover":
-        note = "library songs often played, not lately"
+        note = "library songs often played (the shuffle's own picks left out), not lately"
     elif r.sets.get("recommended", 0) > 0:
         note = "not ranked; recommendations: more of your most played artists point to it; then they take turns"
     else:
@@ -1095,8 +1113,8 @@ def parser(prog=None):
                          "Selection = (union of + sets, or the "
                          "whole library when none is +) - (union of - sets) ∩ period ∩ genres ∩ artists ∩ Top %% ∩ owned")
     ap.add_argument("--rank", choices=["billboard", "plays", "rediscover", "none", "chart", "listens"],
-                    help="billboard: best year-end position; plays: your plays; rediscover: often played, not lately; "
-                         "none: no ranking, no Top %%. Top %% is cut in the rank's own population (the chart songs or "
+                    help="billboard: best year-end position; plays: your plays (the shuffle's own picks left out); "
+                         "rediscover: often played, not lately; none: no ranking, no Top %%. Top %% is cut in the rank's own population (the chart songs or "
                          "the library songs of the period), before sets, genres and artists. Default: billboard when "
                          "+billboard, none for +recommended alone, else plays. (chart = billboard; listens = the "
                          "Billboard cohort by ListenBrainz listens)")
