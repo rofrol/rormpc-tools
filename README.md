@@ -85,12 +85,12 @@ manager for you; take the package from your system's column.
 | Program | What needs it | | Homebrew (macOS) | Debian/Ubuntu (`apt`) | Arch (`pacman`) | Guix |
 |---|---|---|---|---|---|---|
 | `mpd` | everything (the stickers hold the counts) | required | `mpd` | `mpd` | `mpd` | `mpd` |
-| `mpc` | MPD database updates, the current song | required | `mpc` | `mpc` | `mpc` | `mpclient` |
+| `mpc` | MPD database updates, the current song | required | `mpc` | `mpc` | `mpc` | `mpd-mpc` |
 | `ffmpeg` | audio hashes, covers, mp3 conversion (`yt-mp3-mb`, `musicdb update`) | required | `ffmpeg` | `ffmpeg` | `ffmpeg` | `ffmpeg` |
 | `yt-dlp` | YouTube searches and downloads (`yt-mp3-mb`, `liveplaylist`, `hits fetch`) | required for those | `yt-dlp` | `yt-dlp` ¹ | `yt-dlp` | `yt-dlp` |
 | `git` | commits of the history directory | required | `git` | `git` | `git` | `git` |
-| `fpcalc` | AcoustID matching, the Versions audio comparison | optional | `chromaprint` | `libchromaprint-tools` | `chromaprint` | `chromaprint` ² |
-| `rsgain` | ReplayGain tags on downloads | optional | `rsgain` | `rsgain` ² | `rsgain` ² | ² |
+| `fpcalc` | AcoustID matching, the Versions audio comparison | optional | `chromaprint` | `libchromaprint-tools` | `chromaprint` | `chromaprint` |
+| `rsgain` | ReplayGain tags on downloads | optional | `rsgain` | `rsgain` ² | `rsgain` ² | `rsgain` |
 | `terminal-notifier` | failure notifications on macOS (else `osascript`) | optional | `terminal-notifier` | — | — | — |
 | `notify-send` | failure notifications on Linux | optional | — | `libnotify-bin` | `libnotify` | `libnotify` |
 | C compiler, `pkg-config`, OpenSSL and SQLite headers | building the scrobbler (rormpc's `rormpc_install.sh companions`) on Linux | required there | — | `build-essential pkg-config libssl-dev libsqlite3-dev` | `base-devel openssl sqlite` | `gcc-toolchain pkg-config openssl sqlite` |
@@ -100,8 +100,7 @@ manager for you; take the package from your system's column.
   manifest (`guix package -m manifest.scm`).
 - ¹ Debian's and Ubuntu's `yt-dlp` can lag behind YouTube's changes; `uv tool install yt-dlp` gives the current one.
 - ² Not verified: whether this package exists in that distribution's main repositories (`rsgain` may be in Arch's
-  AUR only, and Guix may have none) and, for Guix's `chromaprint`, whether it ships `fpcalc`. Check with your
-  package manager's search.
+  AUR only). Check with your package manager's search.
 - Windows is not supported.
 
 ## Settings
