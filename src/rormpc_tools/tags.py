@@ -48,10 +48,10 @@ def events(path):
     return [json.loads(l) for l in path.read_text().splitlines() if l.strip()] if path.exists() else []
 
 
-def lists():
-    """Fold the log: {name: {key: last add event}}."""
+def lists(path=None):
+    """Fold the log (collections.jsonl, or `path`): {name: {key: last add event}}."""
     state = collections.defaultdict(dict)
-    for e in events(LISTS):
+    for e in events(path or LISTS):
         if e["action"] == "add":
             state[e["list"]][e["song"]["key"]] = e
         else:

@@ -98,7 +98,7 @@ def test_rules_round_trip_through_options_and_args(lib):
     assert sl.as_args(lst) == {"period": "1985-1992", "top": "1-10,21-50", "genre": "+hip hop, -country",
                                "artist": "", "owned": True, "rank": "billboard", "years_of": "chart",
                                "sets": ["+billboard", "-likes"], "show_excluded": False, "source": None,
-                               "open_list": "L", "open_list_name": "N"}
+                               "set_names": {}, "open_list": "L", "open_list_name": "N"}
     assert sl.as_args({**lst, "rules": rules | {"top": None}})["top"] == "1-100"  # no Top % in Play's filters
     assert sl.formula(rules) == "Billboard − Likes ∩ 1985-1992 ∩ Top 1-10,21-50% ∩ hip hop − country ∩ owned"
 
@@ -114,7 +114,8 @@ def newer(lst_id="L1", **change):
 @pytest.mark.parametrize("evts, why", [
     ([newer(mood="happy")], "unknown rule field mood"),
     ([newer(schema=2)], "rules schema 2"),
-    ([newer(sets={"tag:God": 1})], "set 'tag:God'"),
+    ([newer(sets={"tag:": 1})], "set 'tag:'"),
+    ([newer(sets={"mood:sad": 1})], "set 'mood:sad'"),
     ([newer(rank="vibes")], "rank 'vibes'"),
     ([newer(), {"id": "L1", "event": "pin", "schema": 1}], "event 'pin'"),
     ([newer() | {"schema": 2}], "event schema 2"),
@@ -218,7 +219,7 @@ def test_export_writes_smart_name_playlists_and_drops_stale_ones(lib, monkeypatc
     row = next(r for r in sl.listing() if r["name"] == "Mine")
     assert row["exported"] and row["exported_songs"] == 2 and row["playlist"] == "Smart Mine"
     # rormpc's picker parses a copy of this shape (rormpc_smartlists.rs, test parses_the_lists_json)
-    assert set(row) == {"id", "name", "rules", "blocked", "args", "formula", "exceptions", "playlist", "exported",
+    assert set(row) == {"id", "name", "rules", "blocked", "error", "args", "formula", "exceptions", "playlist", "exported",
                         "exported_songs", "created", "updated"}
     run(["lists", "rename", "Mine", "Ours"], monkeypatch)  # the export follows the name
     assert (musicdb.PLAYLISTS / "Smart Ours.m3u").read_text() == "a\nc\n"

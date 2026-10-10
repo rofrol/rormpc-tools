@@ -10,8 +10,9 @@
 - Pin ✚: the song is in, whatever the sets, period, Top %, genres and artists say. It needs an owned file, has
   no rank, sits after the ranked rows and is not part of the ranking or the Top % cut.
 - Exclusion ⊘: the song is out. Any applicable exclusion beats any pin; a pin beats `-` sets, genres and artists.
-- Scope: `library` (every result) or one set (`set:billboard`, `set:likes`, ...): a set-scoped exception applies
-  only while that set is + in the selection; `list:<id>` (a smart list, `hits lists`) only while that list is
+- Scope: `library` (every result) or one set (`set:billboard`, `set:likes`, a named set `set:tag:God`,
+  `set:playlist:NAME`, `set:live:ID`, `set:list:ID`): a set-scoped exception applies only while that set is + in
+  the selection; `list:<id>` (a smart list, `hits lists`) only while that list is
   open (`hits --list`, or rormpc's Play passing `--open-list`). Deleting a smart list removes its exceptions.
 
 Identity: a library song by music-data's song `id` (songs.jsonl; a merged id leads to the song it was merged
@@ -32,22 +33,25 @@ def log_path():
 
 
 def parse_scope(text):
-    """'library' | 'set:billboard' (aliases as --set reads them) | 'list:ID' (a smart list by id or name) -> the
-    canonical scope; anything else refused."""
+    """'library' | 'set:billboard' (aliases as --set reads them) | 'set:tag:God' (a named set, stored by its
+    canonical key, hits_sets.canonical) | 'list:ID' (a smart list by id or name) -> the canonical scope; anything
+    else refused."""
     text = (text or "library").strip()
     if text == "library":
         return text
     kind, colon, name = text.partition(":")
     if kind == "set" and colon:
+        from . import hits_sets
         key, _ = hits_rules.parse_set(name)
-        return f"set:{key}"
+        return f"set:{hits_sets.canonical(key)}"
     if kind == "list" and colon:
         from . import smartlists
         try:
             return f"list:{smartlists.find(name)['id']}"
         except LookupError as err:
             raise ValueError(f"scope {text}: {err}") from None
-    raise ValueError(f"unknown scope {text!r}; use library, set:{'|'.join(hits_rules.SET_KINDS)} or list:ID")
+    raise ValueError(f"unknown scope {text!r}; use library, set:{'|'.join(hits_rules.SET_KINDS)}, "
+                     f"set:KIND:NAME ({', '.join(hits_rules.NAMED_KINDS)}) or list:ID")
 
 
 applies = hits_rules.exception_applies
@@ -207,11 +211,14 @@ def remove(scope, song, chart_key):
 def listing():
     """Every exception in force as rows for rormpc's Exceptions list: the current file (None and `gone` for a
     pinned song whose file went away: it is skipped, never dropped from the log); `scope_name` names a smart
-    list's scope."""
-    from . import smartlists
+    list's scope ("80s party") or a named set's ("Tag God")."""
+    from . import hits_sets, smartlists
     names = {f"list:{i}": lst["name"] for i, lst in smartlists.fold().items()}
+    found = active()
+    named = {e["scope"][4:] for e in found if e["scope"].startswith("set:") and ":" in e["scope"][4:]}
+    names |= {f"set:{k}": v for k, v in hits_sets.labels(named).items()}
     rows = []
-    for e in active():
+    for e in found:
         song = survivor(e["song"]) if e.get("song") else None
         file = live_path(song) if song else None
         rows.append({"id": e["id"], "action": e["action"], "scope": e["scope"], "song": song,

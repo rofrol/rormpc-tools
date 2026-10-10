@@ -12,7 +12,9 @@
 The log is `<data_dir>/smartlists.jsonl`, one event per line: {id (the list's UUID), event create|update|rename|
 delete, name, schema, rules, ts}. Folding takes the file order (the later line wins), so a git merge of two
 machines' appends keeps both. The rules are semantic fields, not argv: {schema, sets {key: ±1}, rank, years_of,
-period, top, genres ["+rock", "-country"], artists ["+Queen"], owned}. A list whose rules or events this version
+period, top, genres ["+rock", "-country"], artists ["+Queen"], owned}; named sets by their canonical keys
+(tag:NAME, playlist:NAME, live:ID, list:ID, hits_sets.py). A list using another list as a set is evaluated
+recursively; a list that leads back to itself is refused on update and shown as an error. A list whose rules or events this version
 cannot read is blocked ("made by a newer rormpc-tools, update it"): it never runs with a field dropped, and its
 last export stays as it was.
 
@@ -22,7 +24,7 @@ owned songs, never read back as rules; hits' "my playlists" set leaves "Smart " 
 """
 import argparse, contextlib, datetime as dt, io, json, re, sys, uuid
 
-from . import hits_exceptions, hits_rules, musicdb
+from . import hits_exceptions, hits_rules, hits_sets, musicdb
 
 PREFIX = "Smart "
 NEWER = "made by a newer rormpc-tools, update it"
@@ -44,6 +46,7 @@ def playlist_path(name):
 def rules_of(a):
     """hits' parsed filter options -> the rules a smart list stores (ValueError when they cannot be stored)."""
     r = hits_rules.resolve(a.source, a.set, a.rank, a.years_of, a.sort)
+    r.sets = hits_sets.canonical_sets(r.sets)
     if r.order:
         raise ValueError("--rank listens cannot be saved in a smart list (Rank by billboard, plays or rediscover)")
     top = hits_rules.top_for(r, a.top)
@@ -125,6 +128,7 @@ def as_args(lst):
             "genre": ", ".join(rules.get("genres", [])), "artist": "; ".join(rules.get("artists", [])),
             "owned": rules.get("owned", False), "rank": rules["rank"], "years_of": rules["years_of"],
             "sets": [("+" if v > 0 else "-") + k for k, v in rules.get("sets", {}).items()],
+            "set_names": {k: v for k, v in hits_sets.labels(rules.get("sets", {})).items() if ":" in k},
             "show_excluded": False, "source": None, "open_list": lst["id"], "open_list_name": lst["name"]}
 
 
@@ -133,7 +137,7 @@ def formula(rules):
     r = argparse.Namespace(sets=rules.get("sets", {}))
     return hits_rules.formula(r, period=rules.get("period"), top=hits_rules.parse_top(rules.get("top")),
                               genre=", ".join(rules.get("genres", [])), artist="; ".join(rules.get("artists", [])),
-                              owned=rules.get("owned", False))
+                              owned=rules.get("owned", False), names=hits_sets.labels(r.sets))
 
 
 # ---------------------------------------------------------------- the log
@@ -224,7 +228,11 @@ def create(name, rules, exceptions=()):
 
 
 def update(ref, rules):
-    lst = find(ref)
+    lists = fold()
+    lst = find(ref, lists)
+    err = hits_sets.cycle(lst["id"], rules, lists)
+    if err:
+        raise ValueError(err)
     record("update", lst["id"], schema=hits_rules.RULES_SCHEMA, rules=rules)
     return fold()[lst["id"]]
 
@@ -313,10 +321,11 @@ def listing():
         if e["scope"].startswith("list:"):
             c = counts.setdefault(e["scope"][5:], {"pins": 0, "exclusions": 0})
             c["pins" if e["action"] == "pin" else "exclusions"] += 1
-    rows = []
-    for lst in sorted(fold().values(), key=lambda x: (x["name"] or "").lower()):
+    rows, lists = [], fold()
+    for lst in sorted(lists.values(), key=lambda x: (x["name"] or "").lower()):
         when, n = exported(lst)
         rows.append({"id": lst["id"], "name": lst["name"], "rules": lst["rules"], "blocked": lst["blocked"],
+                     "error": None if lst["blocked"] else hits_sets.cycle(lst["id"], lst["rules"], lists),
                      "args": None if lst["blocked"] else as_args(lst),
                      "formula": None if lst["blocked"] else formula(lst["rules"]),
                      "exceptions": counts.get(lst["id"], {"pins": 0, "exclusions": 0}),
@@ -353,7 +362,7 @@ def main(argv):
             fixes = r["exceptions"]
             extra = (f" · +{fixes['pins']} pins" if fixes["pins"] else "") + (
                 f" · -{fixes['exclusions']}" if fixes["exclusions"] else "")
-            state = r["blocked"] or f"{r['formula']}{extra}" + (
+            state = r["blocked"] or (f"! {r['error']} · " if r["error"] else "") + f"{r['formula']}{extra}" + (
                 f" · exported {r['exported'][:16]} ({r['exported_songs']})" if r["exported"] else "")
             print(f"{r['name']}  [{r['id'][:8]}]  {state}")
         return

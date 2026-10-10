@@ -1,5 +1,7 @@
 """hits' selection rules (hits_rules.py): the ± set algebra, the rank population rule, --source as a shorthand,
 Top % refused without a rank, and the printed formula."""
+from types import SimpleNamespace
+
 import pytest
 
 from rormpc_tools import hits_rules as hr
@@ -40,10 +42,24 @@ def test_a_later_set_value_wins_and_aliases_are_read():
     assert hr.parse_sets(["+billboard,-likes"]) == {"billboard": 1, "likes": -1}
 
 
-@pytest.mark.parametrize("tok", ["+tag:Christmas", "-playlist:Road trip", "+live:x", "+list:1"])
-def test_named_sets_are_parsed_but_not_supported_yet(tok):
-    with pytest.raises(ValueError, match="not supported yet"):
-        hr.parse_set(tok)
+@pytest.mark.parametrize("tok, parsed", [
+    ("+tag:Christmas", ("tag:Christmas", 1)), ("-playlist:Road  trip ", ("playlist:Road trip", -1)),
+    ("+live:yt-x", ("live:yt-x", 1)), ("list:1", ("list:1", 1)), ("-TAG:a: b, c", ("tag:a: b, c", -1))])
+def test_named_sets_keep_their_name(tok, parsed):
+    assert hr.parse_set(tok) == parsed
+
+
+def test_a_named_set_is_one_set_value_commas_and_all():
+    assert hr.parse_sets(["+billboard,-likes", "+tag:Rock, Pop", "-playlist:a:b"]) == {
+        "billboard": 1, "likes": -1, "tag:Rock, Pop": 1, "playlist:a:b": -1}
+    with pytest.raises(ValueError, match="give a name"):
+        hr.parse_set("+tag:  ")
+
+
+def test_the_formula_names_named_sets():
+    r = SimpleNamespace(sets={"billboard": 1, "tag:God": 1, "list:L1": -1, "playlist:Road trip": -1})
+    assert hr.formula(r, names={"list:L1": "Smart 80s"}) == (
+        "(Billboard ∪ Tag God) − (Smart 80s ∪ Playlist Road trip)")
 
 
 def test_unknown_sets_are_refused():

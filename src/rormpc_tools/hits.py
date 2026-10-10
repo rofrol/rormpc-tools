@@ -18,9 +18,11 @@
   hits 1980s --set +billboard --set +likes --set -playlists --top 1-10   # (Billboard ∪ Likes) − Playlists
   hits --years 1990-1999 --rank plays --years-of release --top 1-10     # my most played songs released then
   hits --set +recommended                     # recommendations: artists similar to your most played (LB Radio)
+  hits --set +tag:God --set "-playlist:Road trip" --set "+list:80s party"   # named sets (hits_sets.py)
+  hits sets [--json]                          # every tag list, MPD playlist, Live playlist and smart list as a set
   hits --source likes|library|mine|playlists|recs   # the old shorthands, mapped onto --set/--rank/--years-of
   hits hide --artist A --title T [--mbid M]   # hide a song from every Hits result (log in the data repo)
-  hits except pin|exclude|remove --scope library|set:KIND --file PATH   # an exception to the rules (--help)
+  hits except pin|exclude|remove --scope library|set:KIND[:NAME] --file PATH   # an exception to the rules (--help)
   hits exceptions [--json]                    # every pin and exclusion, the hides included
   hits lists [create|update|rename|duplicate|delete|export] (--help)   # smart lists: saved rules with a name
   hits --list "80s party"                     # run a smart list's rules (its list-scoped exceptions apply)
@@ -37,7 +39,7 @@ Caches: ~/.cache/hits/.
 """
 import argparse, collections, datetime as dt, json, os, pathlib, re, subprocess, sys, time, urllib.parse, urllib.request
 
-from . import hits_exceptions, hits_rules, mbtag, musicdb, settings
+from . import hits_exceptions, hits_rules, hits_sets, mbtag, musicdb, settings
 
 
 CACHE = pathlib.Path(os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")) / "hits"
@@ -681,6 +683,10 @@ def candidates(years, a, lib, plays, last):
         for c in recs_candidates(a, lib, plays):
             cands[c["key"]] = c
             members["recommended"].add(c["key"])
+    # the named sets last: a smart list's members may be chart rows or recommendations of these candidates
+    for k in r.sets:
+        if ":" in k:
+            members[k] = hits_sets.members(k, cands, a)
     return cands, members
 
 
@@ -748,14 +754,27 @@ FILTER_OPTIONS = [("decade", "decade", None), ("--years", "years", None), ("--to
 
 
 def show(a):
-    """Run the rules, print the rows (and write --json, --playlist, --download); returns the rows."""
+    """Run the rules, print the rows (and write --json, --playlist, --download); returns the rows. A rules error
+    exits with its message; inside another run (a smart list used as a set, `a.nested`) it raises SetError."""
+    try:
+        return _show(a)
+    except hits_sets.SetError as err:
+        if getattr(a, "nested", False):
+            raise
+        hits_rules.fail(err)
+
+
+def _show(a):
     try:
         if getattr(a, "list", None) or getattr(a, "rules_file", None):
             load_rules(a)
         a.rules = hits_rules.resolve(a.source, a.set, a.rank, a.years_of, a.sort)
+        a.rules.sets = hits_sets.canonical_sets(a.rules.sets)
         a.top_ranges = hits_rules.top_for(a.rules, a.top)
     except (ValueError, LookupError, OSError) as err:
-        hits_rules.fail(err)
+        raise hits_sets.SetError(str(err)) from None
+    if getattr(a, "open_list", None) and not getattr(a, "list_stack", None):
+        a.list_stack = [a.open_list]  # the open list may not use itself as a set
     r = a.rules
     r.list = getattr(a, "open_list", None)  # the open smart list: its exceptions (scope list:ID) apply
     if r.rank == "none" and a.top:
@@ -773,8 +792,9 @@ def show(a):
         groups = [("all years", [])]
     period = a.years or a.decade or "all years"
     a.cohort_artists = {}
+    a.set_names = hits_sets.labels(r.sets)
     a.formula = hits_rules.formula(r, period=a.years or a.decade, top=a.top_ranges, genre=a.genre,
-                                   artist=a.artist, owned=a.owned)
+                                   artist=a.artist, owned=a.owned, names=a.set_names)
     label = make_label(a, period)
     print(f"# {label}   ✓ = in library, plays = your play count")
     rows, a.candidates, a.cohort, a.mine_plays = [], 0, 0, 0
@@ -911,7 +931,8 @@ def write_json(a, label, rows, plays):
     """Versioned result file for rormpc's Hits pane, written atomically (the pane may read it any time). Version
     1 gained fields only: "rules", "formula", "summary", "counts", args.sets/years_of, rows' "ranked" and "sets";
     then (exceptions) counts.pinned/excluded, args.show_excluded, rows' "pinned", "excluded", "exceptions",
-    "song_id" and "chart_key"; then (smart lists) args.open_list and args.open_list_name
+    "song_id" and "chart_key"; then (smart lists) args.open_list and args.open_list_name; then (named sets)
+    args.set_names {"tag:God": "Tag God", "list:ID": "Smart 80s party", ...}
     (rormpc's hits.rs parses a copy of this shape in its tests; tests/test_rormpc_contract.py checks this side)."""
     r = a.rules
     owned = sum(1 for s in rows if s["file"])
@@ -921,6 +942,7 @@ def write_json(a, label, rows, plays):
            "args": {"period": a.years or a.decade, "top": a.top, "genre": a.genre, "artist": a.artist,
                     "owned": a.owned, "rank": r.rank, "years_of": r.years_of,
                     "sets": [("+" if v > 0 else "-") + k for k, v in r.sets.items()],
+                    "set_names": {k: v for k, v in a.set_names.items() if ":" in k},
                     "show_hidden": a.show_excluded, "show_excluded": a.show_excluded, "source": r.source,
                     "sort": a.sort, "open_list": r.list, "open_list_name": open_list_name(r.list)},
            "rules": hits_rules.as_dict(r) | {"period": a.years or a.decade, "top": a.top if a.top_ranges else None,
@@ -1030,6 +1052,8 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "lists":
         from . import smartlists
         return smartlists.main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "sets":
+        return hits_sets.main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "prefetch":
         ap = argparse.ArgumentParser(prog="hits prefetch")
         ap.add_argument("cmd"); ap.add_argument("years", nargs="?", default=f"{FIRST_YEAR}-{dt.date.today().year - 1}")
@@ -1044,7 +1068,7 @@ def main():
 
 
 def set_argv(argv):
-    """"--set -likes": argparse would read "-likes" as an option, so it becomes "--set=-likes"."""
+    """"--set -likes" (or "-tag:Rock: live"): argparse would read it as an option, so it becomes "--set=-likes"."""
     out, rest = [], iter(argv)
     for x in rest:
         nxt = next(rest, None) if x == "--set" else None
@@ -1065,7 +1089,9 @@ def parser(prog=None):
                     help="a set chip, repeatable: +KIND includes, -KIND excludes; KIND: billboard (US year-end "
                          "charts), likes (rmpc like sticker), playlists (all your MPD playlists except the generated "
                          "ones: hits --playlist's, LB …, Folder …, Skipped, Not finished), recommended (songs of artists "
-                         "similar to your most played ones, ListenBrainz Radio). Selection = (union of + sets, or the "
+                         "similar to your most played ones, ListenBrainz Radio); named sets: tag:NAME, playlist:NAME, "
+                         "live:ID, list:ID|NAME (hits sets lists them; one per --set, a name may hold commas). "
+                         "Selection = (union of + sets, or the "
                          "whole library when none is +) - (union of - sets) ∩ period ∩ genres ∩ artists ∩ Top %% ∩ owned")
     ap.add_argument("--rank", choices=["billboard", "plays", "rediscover", "none", "chart", "listens"],
                     help="billboard: best year-end position; plays: your plays; rediscover: often played, not lately; "

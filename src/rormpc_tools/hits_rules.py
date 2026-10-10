@@ -17,9 +17,10 @@ from types import SimpleNamespace
 # set kinds with a fixed chip row in rormpc's Hits pane: key -> name in the printed formula
 SET_KINDS = {"billboard": "Billboard", "likes": "Likes", "playlists": "Playlists", "recommended": "Recommended"}
 SET_ALIASES = {"recs": "recommended", "like": "likes", "playlist": "playlists", "charts": "billboard"}
-# KIND:NAME sets picked through rormpc's "+ set…" (tag lists, stored MPD playlists, Live playlists, smart lists):
-# phase 5. Parsing already accepts the syntax so that phase only adds a membership reader per kind.
+# KIND:NAME sets picked through rormpc's "+ set…" (tag lists, stored MPD playlists, Live playlists, smart lists);
+# hits_sets.py reads their members and keeps their keys canonical
 NAMED_KINDS = ("tag", "playlist", "live", "list")
+NAMED_LABELS = {"tag": "Tag", "playlist": "Playlist", "live": "Live", "list": "Smart"}  # in the formula
 RANKS = ("billboard", "plays", "rediscover", "none")
 YEARS_OF = ("release", "chart", "listened")
 RULES_SCHEMA = 1
@@ -49,26 +50,32 @@ def default_rank(sets):
 
 
 def parse_set(tok):
-    """'+billboard', '-likes', 'recs' (no sign = +) -> ('billboard', 1). KIND:NAME is the later "+ set…" form."""
+    """'+billboard', '-likes', 'recs' (no sign = +) -> ('billboard', 1); '+tag:God' -> ('tag:God', 1). A name
+    keeps its case, colons and commas; its spaces are trimmed and collapsed (hits_sets.canonical stores it)."""
     tok = (tok or "").strip()
-    sign = -1 if tok.startswith("-") else 1
-    body = tok.lstrip("+-").strip()
+    sign = -1 if tok[:1] == "-" else 1
+    body = tok[1:].strip() if tok[:1] in "+-" else tok
     kind, colon, name = body.partition(":")
-    kind = kind.lower() if colon else SET_ALIASES.get(kind.lower(), kind.lower())
+    kind = kind.strip().lower() if colon else SET_ALIASES.get(kind.lower(), kind.lower())
     if colon:
         if kind not in NAMED_KINDS:
             raise ValueError(f"unknown set kind {kind!r} in {tok!r} (named sets: {', '.join(NAMED_KINDS)})")
-        raise ValueError(f"set {tok!r}: {kind}:NAME sets are not supported yet (only {', '.join(SET_KINDS)})")
+        name = re.sub(r"\s+", " ", name.strip())
+        if not name:
+            raise ValueError(f"set {tok!r}: give a name after {kind}:")
+        return f"{kind}:{name}", sign
     if kind not in SET_KINDS:
         raise ValueError(f"unknown set {tok!r}; use ±{'|'.join(SET_KINDS)}")
     return kind, sign
 
 
 def parse_sets(tokens):
-    """--set values in order -> {key: +1|-1}; a later value for the same set wins."""
+    """--set values in order -> {key: +1|-1}; a later value for the same set wins. Commas separate fixed sets
+    ("+billboard,-likes"); a value naming a KIND:NAME set is that one set, commas and all."""
     out = {}
     for tok in tokens or []:
-        for part in filter(None, (p.strip() for p in tok.split(","))):
+        parts = [tok] if ":" in tok else tok.split(",")
+        for part in filter(None, (p.strip() for p in parts)):
             k, sign = parse_set(part)
             out[k] = sign
     return out
@@ -243,7 +250,7 @@ def select(cands, members, rules, *, wanted=(), top=None, owned=False, show_hidd
 # ---------------------------------------------------------------- exceptions
 
 def exception_applies(e, rules):
-    """library always; set:KIND while KIND is a + set; list:ID while that smart list is open (`rules.list`, set by
+    """library always; set:KIND (set:tag:NAME, set:list:ID, ...) while that set is +; list:ID while that smart list is open (`rules.list`, set by
     --list / --open-list) (hits_exceptions.applies)."""
     kind, _, key = e["scope"].partition(":")
     if kind == "list":
@@ -313,11 +320,22 @@ def signed_tokens(spec):
     return [(-1 if t.startswith("-") else 1, t.lstrip("+-").strip()) for t in (t.strip() for t in toks) if t]
 
 
-def formula(rules, *, period=None, top=None, genre="", artist="", owned=False):
-    """The selection in one line, e.g. "(Billboard ∪ Likes) − Recommended ∩ 1980-1989 ∩ Top 1-10% ∩ rock".
-    rormpc's Hits pane builds the same text from its filters (`rule_formula`); keep both in step."""
-    plus = [SET_KINDS[k] for k, s in rules.sets.items() if s > 0]
-    minus = [SET_KINDS[k] for k, s in rules.sets.items() if s < 0]
+def set_name(key, names=None):
+    """A set's name in the formula: a fixed set's, else `names` (hits_sets.labels), else "Tag God" from the key."""
+    if key in SET_KINDS:
+        return SET_KINDS[key]
+    if names and key in names:
+        return names[key]
+    kind, _, name = key.partition(":")
+    return f"{NAMED_LABELS.get(kind, kind)} {name}"
+
+
+def formula(rules, *, period=None, top=None, genre="", artist="", owned=False, names=None):
+    """The selection in one line, e.g. "(Billboard ∪ Tag God) − Recommended ∩ 1980-1989 ∩ Top 1-10% ∩ rock";
+    `names`: {set key: name} of the named sets (hits_sets.labels). rormpc's Hits pane builds the same text from
+    its filters (`rule_formula`); keep both in step."""
+    plus = [set_name(k, names) for k, s in rules.sets.items() if s > 0]
+    minus = [set_name(k, names) for k, s in rules.sets.items() if s < 0]
     out = _union(plus) if plus else "Library"
     if minus:
         out += f" − {_union(minus)}"
