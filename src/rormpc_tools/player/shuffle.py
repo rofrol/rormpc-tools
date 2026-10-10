@@ -20,7 +20,16 @@ A lane with nothing eligible lends its turn to familiar, then rediscovery, then 
 The next PLAN_N songs are drawn ahead (the plan, in play order) and published as MPD priorities PLAN_N..1, below the
 Up next requests, so MPD itself plays them in order; rormpc shows the plan in its ShuffleNext column and Shuffle view. A planned song leaves the plan when it plays, leaves the queue, is asked for with Play next, gets
 "heard enough" or is played by hand; its lane goes back for its replacement, and the plan is topped up at the end. When the source is a Hits result (rormpc's source.json kind
-"hits"), a round plays each song once (hard rule); when all were heard it stops and says so; `shuffle newround`.
+"hits"), a round plays each song once (hard rule); when all were heard the next round starts by itself (decided
+2026-10-10; `shuffle rounds manual` stops at the round's end instead until `shuffle newround`, `shuffle rounds auto`
+goes back). The plan always aims at PLAN_N songs: when the current round has fewer left, the rest are drawn from the
+next round by the same weights and carry `round: 1` (rormpc marks them "next round"); planning marks nothing heard
+and never advances the round, playback does: the round moves on when a next-round entry plays from the plan's head,
+or when every song of the round was heard. Each queue entry appears once in the plan (one MPD priority each), so a
+next round holds the source's songs not already planned for this one. When nothing at all is eligible (all resting),
+the rest is relaxed for the least recently played resting song (`relaxed: true`, "rest relaxed"): the plan is never
+empty while the source has a song to play. A plan shorter than PLAN_N says why in `ahead_note` ("4 ahead · 12
+resting").
 The round's key is source.json's `rules_hash` (rormpc's Play: the same rules keep the round, other rules start a
 new one), else its name; the song playing across the switch is outside the source's files and never in the round.
 Songs appended by hand to a Hits source (source.json `added`, rormpc's Browse `a`) join its files and the round; one
@@ -36,10 +45,11 @@ played to FINISHED_SHARE keeps its finished outcome). Each move is logged in pre
 confirmed or failed once the transition is observed; `musicdb import-skips` drops the scrobbler's skip that matches.
 
 Commands: `shuffle on|off|release`, `shuffle reroll`, `shuffle heardenough FILE` (the playing song also skips to
-the next), `shuffle unheardenough FILE`, `shuffle newround`, `shuffle prev [CMD_ID]`.
-Files: shuffle.json (state: enabled, plan [{id, file, lane, slot, why}], cycle (lanes not yet planned), new_today,
-rests, cooldown, recent, live outcomes, round, active, reason, trail [{id, file}], cursor); auto.jsonl (one line per
-song this shuffle started: {start, file}), read by musicdb; prev.jsonl (each Previous move: {cmd, t, from, from_id,
+the next), `shuffle unheardenough FILE`, `shuffle newround`, `shuffle rounds auto|manual`, `shuffle prev [CMD_ID]`.
+Files: shuffle.json (state: enabled, plan [{id, file, lane, slot, why, round (0 this round, 1 the next; Hits only),
+relaxed}], cycle (lanes not yet planned), new_today, rests, cooldown, recent, live outcomes, round {source, number,
+heard, total, done}, rounds (auto|manual), ahead_note, active, reason, trail [{id, file}], cursor); auto.jsonl
+(one line per song this shuffle started: {start, file}), read by musicdb; prev.jsonl (each Previous move: {cmd, t, from, from_id,
 to, to_id}, then {cmd, result: confirmed|failed}), read by `musicdb import-skips`.
 """
 import datetime as dt, json, math, os, random, time, uuid
@@ -110,6 +120,8 @@ class Shuffle(Module):
         self.cycle = saved.get("cycle", [])
         self.new_today = saved.get("new_today", {"day": today(), "n": 0})
         self.round = saved.get("round")
+        self.rounds = saved.get("rounds", "auto")  # "auto": the next round starts when one ends; "manual"
+        self.ahead_note = ""  # why the plan is shorter than PLAN_N ("4 ahead · 12 resting"), "" when full
         self.trail = saved.get("trail", [])  # songs that really played, oldest first: [{id, file}]
         self.cursor = saved.get("cursor")  # trail index of the song gone back to, None at the trail's end
         self.pending_prev = None  # the Previous move being made, until its transition is observed
@@ -146,7 +158,8 @@ class Shuffle(Module):
         write_state("shuffle", {
             "enabled": self.enabled, "plan": self.plan, "nominee": self.nominee, "cooldown": self.cooldown,
             "rests": self.rests, "recent": self.recent, "live": self.live, "history": self.history, "cycle": self.cycle,
-            "new_today": self.new_today, "round": self.round, "active": self.active, "reason": self.reason,
+            "new_today": self.new_today, "round": self.round, "rounds": self.rounds, "ahead_note": self.ahead_note,
+            "active": self.active, "reason": self.reason,
             "plan_version": self.plan_version, "pid": os.getpid(), "updated_at": self.updated_at, "ack": self.ack,
             "patch_base": self.patch_base, "publish_error": self.publish_error, "trail": self.trail,
             "cursor": self.cursor})
@@ -309,9 +322,10 @@ class Shuffle(Module):
         for k, e in enumerate(self.plan):
             s = by_id.get(e["id"])
             c = self.cooldown.get(e["file"])
+            # a next-round entry may have been heard in this round; that is why it waits for the next one
             ok = (s is not None and s["file"] == e["file"] and e["id"] not in waiting
                   and int(s.get("prio", 0)) in (0, *OWN_PRIOS)
-                  and not (c and c["until"] > now) and e["file"] not in in_round)
+                  and not (c and c["until"] > now) and not (e.get("round", 0) == 0 and e["file"] in in_round))
             (keep if ok else gone).append(e)
         self.plan = keep
         if gone:
@@ -325,39 +339,109 @@ class Shuffle(Module):
         current = d.status.get("songid")
         now = time.time()
         self.ensure_round()
-        in_round = set(self.round["heard"]) if self.round else set()
         waiting = self.upnext_ids(d)
-        planned = {e["file"] for e in self.plan}
         left_back = self.left_back()
-        base = [s for s in q if s.get("id") != current and int(s.get("prio", 0)) in (0, *OWN_PRIOS)
-                and int(s["id"]) not in waiting and not self.resting(s["file"], now) and s["file"] not in planned
-                and s["file"] not in left_back]
+        # every song the plan could ever hold now, resting or not
+        pool = [s for s in q if s.get("id") != current and int(s.get("prio", 0)) in (0, *OWN_PRIOS)
+                and int(s["id"]) not in waiting and s["file"] not in left_back]
+        members = None
         if self.round:
             # only the Hits snapshot: a song that was playing when the source was switched is not part of it
             members = self.round_members() or {s["file"] for s in q}
             self.round["total"] = len(members)
-            base = [s for s in base if s["file"] not in in_round and s["file"] in members]  # each once per round
-            if not base and not self.plan:
-                if not any(s["file"] not in in_round and s["file"] in members for s in q if s.get("id") != current):
-                    self.round["done"] = True
-                    self.reason = f"round done: all {self.round['total']} heard (shuffle newround starts another)"
-                    return
+            pool = [s for s in pool if s["file"] in members]
+            unheard = any(s["file"] not in self.round["heard"] and s["file"] in members
+                          for s in q if s.get("id") != current)
+            if not unheard and self.rounds == "auto" and self.round["heard"]:
+                self.advance_round(1)  # every song of the round was heard: the next one starts
+            elif not unheard and not self.plan and self.rounds != "auto":
+                self.round["done"] = True
+                self.ahead_note = ""
+                self.reason = f"round done: all {self.round['total']} heard (shuffle newround starts another)"
+                return
+        planned = {e["file"] for e in self.plan}
+        base = [s for s in pool if not self.resting(s["file"], now) and s["file"] not in planned]
         recent = set(self.recent[-RECENT_MAX:])
-        if len(self.plan) < PLAN_N and base:
-            self.clear_patch()  # the first new draw, including a per-song top-up, expires the override
+        # the round the next draw is for: draws never go back to an earlier round than the plan's last entry
+        ahead = max((e.get("round", 0) for e in self.plan), default=0) if self.round else 0
+        drawn = False
         while len(self.plan) < PLAN_N and base:
-            eligible = [s for s in base if s["file"] not in recent] or base  # recent is soft
+            cands = base
+            if self.round and ahead == 0:
+                cands = [s for s in base if s["file"] not in self.round["heard"]]  # each once per round
+                if not cands:
+                    if self.rounds != "auto":
+                        break
+                    ahead = 1  # this round has nothing more to give: the rest comes from the next one
+                    continue
+            if not drawn:
+                self.clear_patch()  # the first new draw, including a per-song top-up, expires the override
+                drawn = True
+            eligible = [s for s in cands if s["file"] not in recent] or cands  # recent is soft
             lane = self.take_lane()
-            used, pool, ws = self.draw_pool(lane, eligible, now)
-            pick = self.rng.choices(pool, weights=ws)[0]
+            used, pick_pool, ws = self.draw_pool(lane, eligible, now)
+            pick = self.rng.choices(pick_pool, weights=ws)[0]
             why = self.explain(used, pick["file"], now) + ("" if used == lane else f" (lent by {lane})")
-            self.plan.append({"id": int(pick["id"]), "file": pick["file"], "lane": used, "slot": lane, "why": why})
+            entry = {"id": int(pick["id"]), "file": pick["file"], "lane": used, "slot": lane, "why": why}
+            if self.round:
+                entry["round"] = ahead
+            self.plan.append(entry)
             base = [s for s in base if s["file"] != pick["file"]]
         if not self.plan:
+            relaxed = self.relax_rest(pool, now)
+            if relaxed:
+                self.clear_patch()
+                self.plan.append(relaxed)
+        if not self.plan:
+            self.ahead_note = ""
             self.reason = "nothing to pick (all resting or requested)"
             return
         self.reason = ""
+        self.ahead_note = self.why_short(pool, len(members) if members is not None else len(q), now)
         await self.publish(d, q)
+
+    def relax_rest(self, pool, now):
+        """Nothing is eligible: the least recently played resting song plays anyway, shown as relaxed. Only a rest
+        is relaxed, never "heard enough" (asked for by the user); a round still plays each song once, so a song
+        heard in this round comes in the next one (in manual rounds it does not come at all)."""
+        cands = [s for s in pool if self.rests.get(s["file"], 0) > now
+                 and not (self.cooldown.get(s["file"]) and self.cooldown[s["file"]]["until"] > now)]
+        if self.round and self.rounds != "auto":
+            cands = [s for s in cands if s["file"] not in self.round["heard"]]
+        if not cands:
+            return None
+        def last_played(file):
+            return max([self.last_heard(file) or 0, *(e["t"] for e in self.live if e["file"] == file)])
+        heard = set(self.round["heard"]) if self.round else set()
+        # a song this round still owes comes first: the round then ends as a round
+        pick = min(cands, key=lambda s: (s["file"] in heard, last_played(s["file"]), s["file"]))
+        last = last_played(pick["file"])
+        ago = f"played {round((now - last) / 3600)} h ago" if last else "never played"
+        entry = {"id": int(pick["id"]), "file": pick["file"], "lane": "relaxed", "slot": None,
+                 "why": f"rest relaxed: nothing else was eligible, the least recently played ({ago})",
+                 "relaxed": True}
+        if self.round:
+            entry["round"] = 1 if pick["file"] in heard else 0
+        return entry
+
+    def why_short(self, pool, total, now):
+        """Why the plan holds fewer than PLAN_N songs ("4 ahead · 12 resting"), "" when it is full."""
+        n = len(self.plan)
+        if n >= PLAN_N:
+            return ""
+        planned = {e["file"] for e in self.plan}
+        files = {s["file"] for s in pool if s["file"] not in planned}
+        resting = {f for f in files if self.resting(f, now)}
+        parts = [f"{n} ahead"]
+        if resting:
+            parts.append(f"{len(resting)} resting")
+        if self.round and self.rounds != "auto" and files & set(self.round["heard"]) - resting:
+            parts.append(f"{len(files & set(self.round['heard']) - resting)} heard this round")
+        if len(parts) == 1:
+            parts.append(f"{total} songs in the source")
+        if any(e.get("relaxed") for e in self.plan):
+            parts.append("rest relaxed")
+        return " · ".join(parts)
 
     async def publish(self, d, q):
         """Give the plan its priorities (PLAN_N - k) and take ours back from songs no longer in it; only changed
@@ -391,6 +475,7 @@ class Shuffle(Module):
                 raise
             self.give_back(self.plan)
             self.plan = []
+        self.ahead_note = ""
         self.publish_error = None
 
     def is_active(self, s):
@@ -416,13 +501,25 @@ class Shuffle(Module):
             self._plan_source = scope
         if not key:
             self.round = None
+            for e in self.plan:
+                e.pop("round", None)
         elif not self.round or self.round.get("source") != key:
             # the total is known now when the source lists its files (a full plan may not draw again for a while)
             members = self.round_members()
-            self.round = {"source": key, "heard": [], "total": len(members) if members else 0, "done": False}
+            self.round = {"source": key, "number": 1, "heard": [], "total": len(members) if members else 0,
+                          "done": False}
+            for e in self.plan:
+                e["round"] = 0
         elif self.round.get("done") and any(f not in self.round["heard"] for f in self.appended()):
             self.round["done"] = False  # a song appended after the round was done: it still plays once
         return source_changed
+
+    def advance_round(self, k):
+        """The round moves on by k (playback reached a song planned for a later round, or every song was heard):
+        nothing is heard in the new one yet, and the plan's later-round entries come k rounds closer."""
+        self.round = {**self.round, "number": self.round.get("number", 1) + k, "heard": [], "done": False}
+        for e in self.plan:
+            e["round"] = max(0, e.get("round", 0) - k)
 
     # ------------------------------------------------------------ watching playback
 
@@ -488,6 +585,8 @@ class Shuffle(Module):
         elif self.plan and str(self.plan[0]["id"]) == s.get("songid"):
             origin = "auto"
             head = self.plan.pop(0)  # its lane is spent now that it plays
+            if self.round and head.get("round", 0) > 0:
+                self.advance_round(head["round"])  # playback, not planning, moves the round on
             if head.get("lane") == "new":
                 self.new_left()
                 self.new_today["n"] += 1
@@ -688,8 +787,14 @@ class Shuffle(Module):
             self.cooldown.pop(args, None)
         elif verb == "newround":
             if self.round:
-                self.round = {**self.round, "heard": [], "done": False}
+                self.round = {**self.round, "number": self.round.get("number", 1) + 1, "heard": [], "done": False}
             await self.withdraw(d)
+        elif verb == "rounds":
+            if args not in ("auto", "manual"):
+                log(f"shuffle rounds: expected auto or manual, got {args!r}")
+                return
+            self.rounds = args
+            await self.withdraw(d)  # the plan is drawn again under the new rule
         else:
             return await super().on_message(d, verb, args)
         now = time.time()

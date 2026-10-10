@@ -166,8 +166,9 @@ def test_heard_enough_cools_down_growing_and_skips_the_playing_song():
     assert "a" not in sh.cooldown
 
 
-def test_hits_round_plays_each_song_once_then_stops():
+def test_hits_round_plays_each_song_once_then_stops_in_manual_rounds():
     d, mpd, sh = setup(files=("a", "b", "c"), data={"c": heard(3)}, source={"kind": "hits", "name": "80s", "len": 3})
+    send(d, mpd, "shuffle rounds manual")
     assert sh.round["source"] == "hits:80s"
     seen = ["a"]
     while sh.nominee:
@@ -295,6 +296,7 @@ def test_heard_enough_on_the_head_plans_again_without_it():
 def test_a_song_appended_to_a_hits_source_joins_its_round_even_after_it_was_done():
     src = {"kind": "hits", "name": "80s", "len": 2, "files": ["b", "c"], "rules_hash": "h1"}
     d, mpd, sh = setup(files=("x", "b", "c"), data={"b": heard(3), "c": heard(3)}, source=src)
+    send(d, mpd, "shuffle rounds manual")
     play(d, mpd, "b")
     play(d, mpd, "c")
     assert sh.round["done"] and sh.round["heard"] == ["b", "c"]
