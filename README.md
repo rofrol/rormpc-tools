@@ -11,7 +11,7 @@ They work from the shell too; each one's usage is in its `--help`.
 | `musicdb lyrics` | lyrics from LRCLIB into `lyrics_dir` (`.lrc` synced, `.txt` plain) for rormpc's Lyrics pane; `candidates` / `use` pick another entry; `translate` takes one song's Polish translation from tekstowo.pl on request (personal use: one song per call, cached in `<song>.pl.json`, never committed anywhere), or when it has none a literal line-by-line machine translation by Claude through the Claude Code CLI (`claude -p` with its own login, no API key; the lyrics go to Anthropic; model: `translate_model`), `lang` overrides the detected language |
 | `mpd-player` | the playback daemon (runs with rormpc closed): silence between songs, Up next, weighted shuffle by plays and likes with "heard enough" cooldowns, pause for a while (plays on at a wall-clock deadline unless anyone did anything meanwhile); commands over MPD messages on channel `rormpc`, see its `--help` |
 | `yt-mp3-mb` | YouTube -> mp3 identified on MusicBrainz, tagged, cover embedded; `--batch --json` for programs: no questions, uncertain matches left for review, a rerun skips what the target dir has |
-| `liveplaylist` | a public YouTube playlist as a "live" MPD playlist (rormpc's Live playlists pane): `add URL`, `check` for new tracks, `accept` / `reject` them, `download`, `list`; every command takes `--json` |
+| `liveplaylist` | a public YouTube playlist or [Omarchy Radio](https://radio.omarchy.org/) as a "live" MPD playlist (rormpc's Live playlists pane): `add URL`, `check` for new tracks, `accept` / `reject` them, `download`, `list`; every command takes `--json` |
 | `yt-playlist` | your YouTube playlists through the YouTube Data API (OAuth), for removing deleted songs |
 
 ### hits: sets, ranks, exceptions and smart lists
@@ -158,7 +158,9 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   Trash or permanent, the ones made before the block list existed included; `musicdb undo` lifts it with the
   record), never kept apart from it. It matches the YouTube video exactly, in every downloader before anything is
   downloaded; the recording MBID and the chart key (`hits.hide_key`) unless the delete found another library file
-  of the same recording. Chart keys gate only chart rows (Hits, `hits fetch`), never a URL someone gave. A download
+  of the same recording. Chart keys gate only chart rows (Hits, `hits fetch`), never a URL someone gave. A source
+  without video ids (Omarchy Radio) is blocked by the deleted file's paths before a download and by its audio hash
+  (the registry's `md5`) after it. A download
   identified afterwards as a deleted recording never enters the library on its own: review (`hits fetch`), blocked
   (`liveplaylist`), dropped with the reason (`yt-mp3-mb`; a question when interactive). Hits rows carry
   `"deleted"`, `hits fetch` items the state `blocked`, `yt-mp3-mb --json` a `"blocked"` list. A deliberate
@@ -220,6 +222,10 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   is uncertain waits outside the music dir (needs_match). The `.m3u` holds accepted, ready, still listed items in
   the playlist's order (file names carry no position). Nothing deletes a file; a failed, partial or empty listing
   marks nothing gone; an item that comes back is active again with its old decision. SIGTERM (rormpc's cancel)
-  kills yt-dlp and queues the item again.
+  kills yt-dlp and queues the item again. Items are keyed by `key` (older YouTube items: `ytid`). Omarchy Radio
+  has no stream and no YouTube or MusicBrainz entries: `check` is a conditional GET of its `playlist.json`, an
+  invalid or duplicate entry makes the listing partial, and an accepted track's MP3 is downloaded as published and
+  tagged with the playlist's names (`match: "publisher metadata"`), or referenced when a library file has the
+  same audio.
 - Personal data (play history, exports, OAuth secrets, account names) never goes into this repository: it is
   public. Paths and accounts come from the settings, with defaults that assume nothing about the user.

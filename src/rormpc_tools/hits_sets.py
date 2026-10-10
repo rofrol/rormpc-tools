@@ -53,7 +53,7 @@ def live_subs():
     """{subscription id: state} of the followed Live playlists (liveplaylist's <data_dir>/liveplaylists)."""
     d = musicdb.DATA / "liveplaylists"
     out = {}
-    for p in sorted(d.glob("yt-*.json")) if d.is_dir() else ():
+    for p in sorted(d.glob("*.json")) if d.is_dir() else ():  # yt-<list id>, omarchy-radio
         try:
             out[p.stem] = json.loads(p.read_text())
         except (OSError, ValueError):

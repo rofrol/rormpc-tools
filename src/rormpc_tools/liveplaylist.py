@@ -1,18 +1,28 @@
-"""Live playlists: a public YouTube playlist mirrored as an MPD playlist, checked for new tracks when you ask.
+"""Live playlists: a public YouTube playlist or Omarchy Radio mirrored as an MPD playlist, checked for new
+tracks when you ask.
 
   liveplaylist add URL [--name NAME] [--dir DIR]   # subscribe and list it; every item waits for your review
   liveplaylist check [ID ...]                      # list again: new items wait (pending), gone ones go inactive
-  liveplaylist accept ID (YTID ... | --all)        # accept items and download them (--no-download: queue only)
-  liveplaylist reject ID YTID ...                  # never download these items (rejects are durable)
+  liveplaylist accept ID (KEY ... | --all)         # accept items and download them (--no-download: queue only)
+  liveplaylist reject ID KEY ...                   # never download these items (rejects are durable)
   liveplaylist download [ID ...]                   # one worker (a second one exits) empties the queue, resumable
   liveplaylist list [ID ...]                       # subscriptions and their items
 
 Every command takes --json: one JSON object on stdout, messages on stderr. ID is the subscription id that `add`
-prints (yt-<playlist id>), YTID a video id.
+prints (yt-<playlist id>, omarchy-radio), KEY an item's key (a YouTube video id; Omarchy Radio: the track's file
+name, or its URL when it is hosted elsewhere).
 
-First version: public YouTube playlists only (no mixes), checked by hand, nothing on a timer. `check` lists the
-playlist with `yt-dlp --flat-playlist -J` (no download). Each item has a decision (pending / accepted / rejected)
-and, separately, a job state (queued / downloading / needs_match / ready / failed):
+Sources, checked by hand, nothing on a timer:
+- Public YouTube playlists (no mixes): `check` lists the playlist with `yt-dlp --flat-playlist -J` (no download).
+- Omarchy Radio (https://radio.omarchy.org/, kind "omarchy"): no stream, a community playlist of songs made for
+  it (not on YouTube or MusicBrainz), published as /tracks/playlist.json. `check` is one conditional GET of that
+  file (ETag); an accepted track's MP3 is downloaded as it is and tagged with the playlist's own artist, title and
+  album ("publisher metadata": nothing to match). An invalid or duplicate entry is skipped and makes the listing
+  partial. A deleted song is blocked by its library path before a download and by its audio hash after it; a
+  download whose audio a library file already has is referenced, not copied. The rest below is about YouTube.
+
+Each item has a decision (pending / accepted / rejected) and, separately, a job state (queued / downloading /
+needs_match / ready / failed / blocked):
 
 - An accepted item that is already in the library is referenced, not downloaded: the same YouTube video in the
   identity registry (songs.jsonl), or the recording MusicBrainz links to that video, when exactly one recording
@@ -33,20 +43,26 @@ State: one JSON per subscription in <data_dir>/liveplaylists/ (written atomicall
 command: ~/.cache/rormpc-tools/liveplaylist/status.json (atomic), its log next to it; locks there too.
 """
 import argparse, contextlib, datetime as dt, fcntl, json, os, pathlib, random, re, shutil, signal, subprocess, sys
-import time, urllib.parse
+import hashlib, time, urllib.error, urllib.parse, urllib.request
 
-from . import deleted, external, identity, mbtag, settings, yt_mp3_mb
+from . import dedupe, deleted, external, identity, mbtag, settings, yt_mp3_mb
 
 SCHEMA = 1
 MUSIC = settings.MUSIC_DIR
 PLAYLISTS = settings.MPD_PLAYLISTS
 DATA = settings.DATA_DIR / "liveplaylists"
 CACHE = settings.XDG_CACHE / "rormpc-tools" / "liveplaylist"
-PAUSE = (3, 8)  # seconds between downloads: external rate limit, YouTube blocks bursts
+PAUSE = (3, 8)  # seconds between downloads: external rate limit, YouTube blocks bursts (Omarchy Radio: politeness)
 MAX_FAILURES = 3
 DECISIONS = ("pending", "accepted", "rejected")
 JOBS = ("queued", "downloading", "needs_match", "ready", "failed", "blocked")
 UNAVAILABLE = re.compile(r"^\[(deleted|private) video\]$", re.I)
+SUB_ID = re.compile(r"yt-[\w-]+|omarchy-radio")
+OMARCHY_HOST = "radio.omarchy.org"
+OMARCHY_LIST = f"https://{OMARCHY_HOST}/tracks/playlist.json"
+TRACK_NAME = re.compile(r"[a-z0-9][a-z0-9-]*\.mp3")  # the station's rule for a track's file (tracks/README.md)
+MAX_TRACK = 40 << 20  # bytes; the station asks for under 10 MB, a bigger answer is not a song
+HTTP_TIMEOUT = 60  # delay: external deadline, a read from a remote host must not hang the worker forever
 
 
 def now():
@@ -94,8 +110,33 @@ def list_id(url):
     return lid
 
 
+def source_of(url):
+    """(kind, subscription id, canonical URL) of a URL we can follow, or a ValueError saying what is supported."""
+    host = (urllib.parse.urlparse(url.strip()).hostname or "").lower()
+    if host == OMARCHY_HOST:
+        return "omarchy", "omarchy-radio", OMARCHY_LIST
+    try:
+        lid = list_id(url)
+    except ValueError as e:
+        raise ValueError(f"{e}; or Omarchy Radio (https://{OMARCHY_HOST}/)") from None
+    return "youtube", f"yt-{lid}", f"https://www.youtube.com/playlist?list={lid}"
+
+
+def kind(sub):
+    return sub.get("kind", "youtube")
+
+
+def ikey(it):
+    """An item's key in its subscription: its own "key", else (items stored before radio sources) its video id."""
+    return it.get("key") or it["ytid"]
+
+
+def item_url(sub, it):
+    return it.get("url") if kind(sub) == "omarchy" else f"https://www.youtube.com/watch?v={it['ytid']}"
+
+
 def sub_path(sid):
-    if not re.fullmatch(r"yt-[\w-]+", sid):
+    if not SUB_ID.fullmatch(sid):
         raise ValueError(f"not a subscription id: {sid}")
     return DATA / f"{sid}.json"
 
@@ -113,7 +154,7 @@ def save(sub):
 
 
 def all_ids():
-    return sorted(p.stem for p in DATA.glob("yt-*.json")) if DATA.is_dir() else []
+    return sorted(p.stem for p in DATA.glob("*.json") if SUB_ID.fullmatch(p.stem)) if DATA.is_dir() else []
 
 
 def ordered(sub):
@@ -162,6 +203,66 @@ def listing(url):
     return yt_mp3_mb.flat(url)
 
 
+def http_get(url, headers=None):
+    """(status, response headers, body) of a GET with our User-Agent; 304 is a status, other errors raise
+    RuntimeError. A body over MAX_TRACK bytes is an error."""
+    req = urllib.request.Request(url, headers={"User-Agent": mbtag.UA, **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+            body = r.read(MAX_TRACK + 1)
+            if len(body) > MAX_TRACK:
+                raise RuntimeError(f"{url}: larger than {MAX_TRACK >> 20} MB")
+            return r.status, r.headers, body
+    except urllib.error.HTTPError as e:
+        if e.code == 304:
+            return 304, e.headers, b""
+        raise RuntimeError(f"{url}: HTTP Error {e.code}: {e.reason}") from None
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        raise RuntimeError(f"{url}: {getattr(e, 'reason', e)}") from None
+
+
+def omarchy_listing(url, etag=None):
+    """Omarchy Radio's playlist.json as a listing like yt-dlp's ({"title", "entries", "etag", "invalid"}), or None
+    when it has not changed since `etag`. An entry without a title or an artist, with a file name the station's
+    rule does not allow, a URL that is not https, or a key seen before is left out and listed in "invalid"."""
+    status, headers, body = http_get(url, {"If-None-Match": etag} if etag else None)
+    if status == 304:
+        return None
+    try:
+        data = json.loads(body)
+    except ValueError:
+        raise RuntimeError(f"{url}: not JSON") from None
+    tracks = data.get("tracks") if isinstance(data, dict) else None
+    if not isinstance(tracks, list):
+        raise RuntimeError(f"{url}: no tracks list")
+    entries, invalid, keys = [], [], set()
+    for t in tracks:
+        t = t if isinstance(t, dict) else {}
+        file, ext = t.get("file"), t.get("url")
+        if ext:
+            ok = isinstance(ext, str) and urllib.parse.urlparse(ext).scheme == "https"
+            key, src = ext, ext
+        else:
+            ok = isinstance(file, str) and bool(TRACK_NAME.fullmatch(file))
+            key, src = file, urllib.parse.urljoin(url, file) if ok else None
+        ok = ok and all(isinstance(t.get(k), str) and t[k].strip() for k in ("title", "artist")) and key not in keys
+        if not ok:
+            invalid.append(t)
+            continue
+        keys.add(key)
+        entries.append({"id": key, "title": t["title"].strip(), "artist": t["artist"].strip(), "url": src,
+                        "album": t["album"] if isinstance(t.get("album"), str) else None,
+                        "explicit": t.get("explicit") is True})
+    name = data.get("name") if isinstance(data.get("name"), str) else ""
+    return {"title": f"{name} Radio" if name else "Omarchy Radio", "entries": entries,
+            "etag": headers.get("ETag"), "invalid": invalid}
+
+
+def source_listing(sub_kind, url, etag=None):
+    """The listing of a source (None: unchanged since `etag`), or RuntimeError."""
+    return omarchy_listing(url, etag) if sub_kind == "omarchy" else listing(url)
+
+
 def merge(sub, info):
     """Apply one listing to the subscription. Returns {"new", "back", "gone", "partial"}. A partial listing (fewer
     entries than the playlist count, or holes) never makes an item inactive."""
@@ -170,28 +271,32 @@ def merge(sub, info):
         raise RuntimeError("yt-dlp returned no playlist entries")
     stamp = now()
     seen, new, back = set(), [], []
-    partial = any(e is None for e in entries)
+    partial = any(e is None for e in entries) or bool(info.get("invalid"))
     total = info.get("playlist_count")
     if isinstance(total, int) and total > len(entries):
         partial = True
     if not entries and any(it["active"] for it in sub["items"].values()):
         partial = True  # a playlist emptied at once is more likely a broken extraction than a decision
     position = 0
+    radio = kind(sub) == "omarchy"
     for e in entries:
         if not e or not e.get("id"):
             continue
         yid, title = e["id"], e.get("title") or ""
         it = sub["items"].get(yid)
-        if UNAVAILABLE.match(title):
+        if UNAVAILABLE.match(title) and not radio:
             # still in the playlist upstream, but not downloadable: keep what we have, add nothing
             if it:
                 seen.add(yid)
                 it["last_seen"] = stamp
             continue
         if it is None:
-            it = sub["items"][yid] = {"ytid": yid, "title": title, "channel": e.get("channel") or e.get("uploader") or "",
-                                      "duration": e.get("duration"), "decision": "pending", "job": None, "path": None,
+            it = sub["items"][yid] = {"key": yid, "title": title, "decision": "pending", "job": None, "path": None,
                                       "first_seen": stamp, "active": True}
+            if radio:
+                it.update(ytid=None, artist=e["artist"])
+            else:
+                it.update(ytid=yid, channel=e.get("channel") or e.get("uploader") or "", duration=e.get("duration"))
             new.append(yid)
         elif not it["active"]:
             it["active"] = True
@@ -199,6 +304,8 @@ def merge(sub, info):
         it.update(position=position, last_seen=stamp)
         if title:
             it["title"] = title
+        if radio:  # what the station says now: a download is tagged with it
+            it.update(artist=e["artist"], url=e["url"], album=e.get("album"), explicit=e.get("explicit", False))
         seen.add(yid)
         position += 1
     gone = []
@@ -209,29 +316,53 @@ def merge(sub, info):
                 gone.append(yid)
     if info.get("title"):
         sub["source_title"] = info["title"]
+    if info.get("etag") and not partial:
+        sub["etag"] = info["etag"]
+    else:
+        sub.pop("etag", None)  # list it in full next time, never "unchanged since a partial listing"
     return {"new": new, "back": back, "gone": gone, "partial": partial}
+
+
+def target_rel(sub, it):
+    """Where a radio item's file lives in the library, relative to the music dir: the station's file name, or for a
+    track hosted elsewhere its URL's name plus a hash of the URL (two hosts may use one name)."""
+    key = it["key"]
+    if TRACK_NAME.fullmatch(key):
+        return f"{sub['dir']}/{key}"
+    stem = urllib.parse.unquote(urllib.parse.urlparse(key).path.rsplit("/", 1)[-1]).removesuffix(".mp3") or "track"
+    return f"{sub['dir']}/{yt_mp3_mb.safe(stem, 100)}--{hashlib.sha1(key.encode()).hexdigest()[:8]}.mp3"
+
+
+def block_of(sub, it, blocks):
+    """The deletion that blocks this item before any download, else None."""
+    return blocks.path(target_rel(sub, it)) if kind(sub) == "omarchy" else blocks.video(it["ytid"])
+
+
+def mark_deleted(sub, blocks):
+    """Mark the items a deletion blocks, for the review, before anyone accepts a deleted song."""
+    for it in sub["items"].values():
+        e = block_of(sub, it, blocks)
+        it["deleted"] = deleted.mark(e) if e else None
 
 
 def check_one(sid):
     """List the playlist (outside the lock), then merge it under the lock."""
-    url = load(sid)["url"]
+    sub = load(sid)
     try:
-        info = listing(url)
-        error = None
+        info = source_listing(kind(sub), sub["url"], sub.get("etag"))
+        unchanged, error = info is None, None
     except RuntimeError as e:
-        info, error = None, str(e)
+        info, unchanged, error = None, False, str(e)
     blocks = deleted.Blocks()
     with locked():
         sub = load(sid)
-        result = {"id": sid, "ok": False, "new": [], "back": [], "gone": [], "partial": False, "error": error}
+        result = {"id": sid, "ok": unchanged, "new": [], "back": [], "gone": [], "partial": False, "error": error}
         if info is not None:
             try:
                 result.update(merge(sub, info), ok=True)
             except RuntimeError as e:
                 result["error"] = str(e)
-        for it in sub["items"].values():  # shown in the review, before anyone accepts a deleted song
-            e = blocks.video(it["ytid"])
-            it["deleted"] = deleted.mark(e) if e else None
+        mark_deleted(sub, blocks)
         sub["last_check"] = {"at": now(), "ok": result["ok"], "error": result["error"], "partial": result["partial"],
                              "new": len(result["new"])}
         save(sub)
@@ -241,23 +372,25 @@ def check_one(sid):
 
 
 def cmd_add(a):
-    lid = list_id(a.url)
-    sid = f"yt-{lid}"
-    url = f"https://www.youtube.com/playlist?list={lid}"
+    sub_kind, sid, url = source_of(a.url)
     if sub_path(sid).exists():
         say(f"{sid}: already subscribed, checking it")
         return {"id": sid, "added": False, "check": check_one(sid)}
-    info = listing(url)  # a playlist that cannot be listed is not subscribed
+    info = source_listing(sub_kind, url)  # a playlist that cannot be listed is not subscribed
+    lid = sid.removeprefix("yt-")
     title = info.get("title") or lid
     with locked():
         if sub_path(sid).exists():
             return {"id": sid, "added": False, "check": check_one(sid)}
         rel = a.dir or f"LivePlaylists/{yt_mp3_mb.safe(title, 80)}--{lid}"
-        sub = {"schema": SCHEMA, "id": sid, "kind": "youtube", "url": url, "list_id": lid, "title": title,
+        sub = {"schema": SCHEMA, "id": sid, "kind": sub_kind, "url": url, "title": title,
                "playlist": a.name or free_name(title, sid), "dir": rel, "added_at": now(), "items": {}}
+        if sub_kind == "youtube":
+            sub["list_id"] = lid
         if a.name and m3u_path(a.name).exists():
             raise ValueError(f"an MPD playlist named {a.name!r} exists already: choose another --name")
         result = merge(sub, info)
+        mark_deleted(sub, deleted.Blocks())
         sub["last_check"] = {"at": now(), "ok": True, "error": None, "partial": result["partial"],
                              "new": len(result["new"])}
         save(sub)
@@ -280,12 +413,12 @@ def cmd_check(a):
 # ------------------------------------------------------------------ decisions
 
 def cmd_accept(a):
-    if not a.all and not a.ytids:
-        raise ValueError("give video ids or --all")
+    if not a.all and not a.keys:
+        raise ValueError("give item keys or --all")
     changed = {"queued": [], "ready": [], "unchanged": []}
     with locked():
         sub = load(a.id)
-        for yid in (a.ytids or [it["ytid"] for it in ordered(sub) if it["decision"] == "pending" and it["active"]]):
+        for yid in (a.keys or [ikey(it) for it in ordered(sub) if it["decision"] == "pending" and it["active"]]):
             it = sub["items"].get(yid)
             if it is None:
                 raise ValueError(f"{a.id} has no item {yid}")
@@ -314,7 +447,7 @@ def cmd_accept(a):
 def cmd_reject(a):
     with locked():
         sub = load(a.id)
-        for yid in a.ytids:
+        for yid in a.keys:
             it = sub["items"].get(yid)
             if it is None:
                 raise ValueError(f"{a.id} has no item {yid}")
@@ -324,15 +457,17 @@ def cmd_reject(a):
                 it["job"] = None
         save(sub)
         write_m3u(sub)
-    say(f"{a.id}: {len(a.ytids)} rejected")
-    return {"id": a.id, "rejected": a.ytids}
+    say(f"{a.id}: {len(a.keys)} rejected")
+    return {"id": a.id, "rejected": a.keys}
 
 
 def cmd_list(a):
     subs = []
     for sid in a.ids or all_ids():
         sub = load(sid)
-        subs.append({k: v for k, v in sub.items() if k != "items"} | {"counts": counts(sub), "items": ordered(sub)})
+        items = [it | {"key": ikey(it), "url": item_url(sub, it)} for it in ordered(sub)]
+        subs.append({k: v for k, v in sub.items() if k not in ("items", "etag")} | {"counts": counts(sub),
+                                                                                  "items": items})
     if not a.json:
         for s in subs:
             c = s["counts"]
@@ -405,8 +540,65 @@ def file_with(directory, yid):
     return None
 
 
+def tag_track(path, it, station):
+    """The station's own names on a downloaded track (publisher metadata), its URL in TXXX "rormpc Source"."""
+    from mutagen.id3 import ID3, ID3NoHeaderError, TALB, TIT2, TPE1, TXXX
+    try:
+        t = ID3(path)
+    except ID3NoHeaderError:
+        t = ID3()
+    t.delall("TPE1"); t.add(TPE1(encoding=3, text=[it["artist"]]))
+    t.delall("TIT2"); t.add(TIT2(encoding=3, text=[it["title"]]))
+    t.delall("TALB"); t.add(TALB(encoding=3, text=[it.get("album") or station]))
+    t.delall("TXXX:rormpc Source"); t.add(TXXX(encoding=3, desc="rormpc Source", text=[it["url"]]))
+    t.save(path)
+
+
+def is_mp3(path):
+    import mutagen.mp3
+    try:
+        return mutagen.mp3.MP3(path).info.length > 0
+    except Exception:
+        return False
+
+
+def fetch_radio(sub, it):
+    """Bring one accepted Omarchy Radio track into the library; returns the fields to store on it."""
+    rel = target_rel(sub, it)
+    blocks = deleted.Blocks()
+    if e := blocks.path(rel):
+        return {"job": "blocked", "error": deleted.reason(e), "deleted": deleted.mark(e)}
+    if (MUSIC / rel).exists():  # moved in before an interruption
+        return {"job": "ready", "path": rel, "source": "download", "match": "publisher metadata", "error": None}
+    stage = staging(sub) / rel.rsplit("/", 1)[-1]
+    if not stage.exists():
+        _, _, body = http_get(it["url"])
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        part = stage.with_name(f".{stage.name}.part")
+        part.write_bytes(body)
+        if not is_mp3(part):
+            part.unlink()
+            return {"job": "failed", "error": f"{it['url']}: not an MP3", "source": "download"}
+        os.replace(part, stage)
+    md5 = dedupe.audio_hash(stage)
+    if md5 and (e := blocks.audio(md5)):  # the same audio deleted under another name
+        stage.unlink()
+        return {"job": "blocked", "error": deleted.reason(e), "deleted": deleted.mark(e), "source": "download"}
+    owned = sorted(r["path"] for r in identity.load()["rows"].values()
+                   if md5 and r.get("state") == "live" and r.get("path") and r.get("md5") == md5)
+    if owned:  # the same audio is in the library already: referenced, not copied
+        stage.unlink()
+        return {"job": "ready", "path": owned[0], "source": "library", "match": "same audio", "error": None}
+    tag_track(stage, it, sub.get("source_title") or sub["title"])
+    path = promote(sub, {**it, "path": str(stage)})
+    return {"job": "ready", "path": path, "source": "download", "match": "publisher metadata", "md5": md5,
+            "error": None}
+
+
 def fetch_item(sub, it):
     """Bring one accepted item into the library; returns the fields to store on it."""
+    if kind(sub) == "omarchy":
+        return fetch_radio(sub, it)
     yid = it["ytid"]
     found = in_library(yid)
     if found:
@@ -486,7 +678,7 @@ def download(ids=None):
             if fetched:  # only after a YouTube request: a library reference asks YouTube nothing
                 time.sleep(random.uniform(*PAUSE))
             current = (sid, yid)
-            write_status(running=True, state="running", subscription=sid, current={"ytid": yid, "title": title},
+            write_status(running=True, state="running", subscription=sid, current={"key": yid, "title": title},
                          done=done, failed=failed, total=done + failed + len(todo), errors=errors[-5:])
             say(f"==> {title} ({yid})")
             sub = update_item(sid, yid, job="downloading")
@@ -498,7 +690,7 @@ def download(ids=None):
             current = None
             # a library reference and a video blocked before its download ask YouTube nothing
             fetched = fields.get("source") != "library" and not (fields["job"] == "blocked" and not fields.get("source"))
-            log(sid, ytid=yid, **{k: v for k, v in fields.items() if k != "review"})
+            log(sid, key=yid, **{k: v for k, v in fields.items() if k != "review"})
             say(f"    {fields['job']}" + (f": {fields['error']}" if fields.get("error") else ""))
             if fields["job"] == "failed":
                 failed += 1
@@ -532,7 +724,7 @@ def download(ids=None):
 
 def queued(ids):
     """Accepted items waiting for the worker, in playlist order (ids: these subscriptions, else all)."""
-    return [(sid, it["ytid"], it["title"]) for sid in ids or all_ids() for it in ordered(load(sid))
+    return [(sid, ikey(it), it["title"]) for sid in ids or all_ids() for it in ordered(load(sid))
             if it["decision"] == "accepted" and it.get("job") == "queued"]
 
 
@@ -554,12 +746,12 @@ def main(argv=None):
     p.set_defaults(fn=cmd_add)
     p = sp.add_parser("check", help="list the playlists again"); p.add_argument("ids", nargs="*"); p.set_defaults(fn=cmd_check)
     p = sp.add_parser("accept", help="accept items (and download them)")
-    p.add_argument("id"); p.add_argument("ytids", nargs="*"); p.add_argument("--all", action="store_true",
-                                                                               help="every pending item")
+    p.add_argument("id"); p.add_argument("keys", nargs="*", metavar="KEY")
+    p.add_argument("--all", action="store_true", help="every pending item")
     p.add_argument("--no-download", action="store_true", help="only queue them")
     p.set_defaults(fn=cmd_accept)
     p = sp.add_parser("reject", help="never download these items")
-    p.add_argument("id"); p.add_argument("ytids", nargs="+"); p.set_defaults(fn=cmd_reject)
+    p.add_argument("id"); p.add_argument("keys", nargs="+", metavar="KEY"); p.set_defaults(fn=cmd_reject)
     p = sp.add_parser("download", help="download the queued items"); p.add_argument("ids", nargs="*")
     p.set_defaults(fn=cmd_download)
     p = sp.add_parser("list", help="subscriptions and items"); p.add_argument("ids", nargs="*"); p.set_defaults(fn=cmd_list)

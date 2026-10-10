@@ -1,0 +1,27 @@
+{
+  "station": "omarchy",
+  "name": "Omarchy",
+  "tracks": [
+    {
+      "title": "Omarchy Oligarchy (Synthwave Mix)",
+      "artist": "YZL81",
+      "file": "yzl81-omarchy-oligarchy-synthwave-mix.mp3"
+    },
+    {
+      "title": "Still Licensed",
+      "artist": "Michel Krapf",
+      "file": "michel-krapf-still-licensed.mp3"
+    },
+    {
+      "title": "public code, private yacht",
+      "artist": "Kevin Koontz",
+      "file": "kevin-koontz-public-code-private-yacht.mp3"
+    },
+    {
+      "title": "It's fucking fork o clock",
+      "artist": "Boyd",
+      "file": "boyd-its-fucking-fork-o-clock.mp3",
+      "explicit": true
+    }
+  ]
+}

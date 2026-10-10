@@ -255,6 +255,15 @@ def test_list_json_shape(live, capsys):
     [s] = out["subscriptions"]
     assert s["id"] == SID and s["counts"]["pending"] == 3 and [it["ytid"] for it in s["items"]] == [A, B, C]
     assert {"decision", "job", "active", "position", "title", "path"} <= set(s["items"][0])
+    assert s["items"][0]["key"] == A and s["items"][0]["url"] == f"https://www.youtube.com/watch?v={A}"
+    with lp.locked():  # items stored before radio sources have no "key": their video id is the key
+        old = sub()
+        for it in old["items"].values():
+            del it["key"]
+        lp.save(old)
+    _, out = call(capsys, "list")
+    assert [it["key"] for it in out["subscriptions"][0]["items"]] == [A, B, C]
+    assert call(capsys, "reject", SID, B)[1]["rejected"] == [B]
 
 
 def test_cancel_requeues_the_item_in_progress(live, capsys, monkeypatch):

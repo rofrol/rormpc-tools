@@ -13,6 +13,8 @@ A deletion blocks:
 The video id is exact. A recording MBID that a download is identified as after the download is never moved into
 the library on its own: it waits for review (hits fetch, liveplaylist) or is dropped with the reason (yt-mp3-mb
 without a question). Chart keys only gate chart rows (Hits, hits fetch), never a URL someone gave.
+A source without video ids (liveplaylist's Omarchy Radio) is blocked by the deleted file's paths before a download
+and by its audio hash (the registry's md5) after it.
 Older journal records without a video id or MBID take them from the identity registry by the file's path.
 """
 import datetime as dt, json
@@ -58,6 +60,7 @@ def entry(r):
     return {"id": r["id"], "file": r["file"], "deleted_at": r["queued_at"], "mode": r.get("mode", "trash"),
             "ytid": r.get("ytid") or row.get("ytid") or identity.ytid_from_name(r["file"]),
             "mbid": (r.get("mbid") or row.get("mbid")) if whole else None,
+            "paths": sorted({r["file"], *row.get("paths", [])}), "md5": row.get("md5"),
             "chart_key": chart_key(artist, title) if whole and artist and title else None,
             "artist": artist, "title": title}
 
@@ -76,10 +79,20 @@ class Blocks:
         self.ytid = {e["ytid"]: e for e in self.entries if e["ytid"]}
         self.mbid = {e["mbid"]: e for e in self.entries if e["mbid"]}
         self.chart = {e["chart_key"]: e for e in self.entries if e["chart_key"]}
+        self.paths = {p: e for e in self.entries for p in e["paths"]}
+        self.md5 = {e["md5"]: e for e in self.entries if e["md5"]}
         return self
 
     def video(self, ytid):
         return self.ytid.get(ytid) if ytid else None
+
+    def path(self, rel):
+        """A file a downloader would write at a path that a deleted file had (sources without a video id)."""
+        return self.paths.get(rel) if rel else None
+
+    def audio(self, md5):
+        """A download whose audio stream (dedupe.audio_hash) is a deleted file's, under any name."""
+        return self.md5.get(md5) if md5 else None
 
     def recording(self, mbid):
         return self.mbid.get(mbid) if mbid else None

@@ -202,3 +202,16 @@ def test_liveplaylist_blocks_a_deleted_video_without_downloading(journal, tmp_pa
     monkeypatch.setattr(yt_mp3_mb, "batch", lambda *a, **k: pytest.fail("a deleted video is not downloaded"))
     fields = lp.fetch_item({"id": "yt-x", "dir": "Live"}, {"ytid": YT})
     assert fields["job"] == "blocked" and fields["error"].startswith("deleted on 2026-10-10")
+
+
+def test_liveplaylist_add_marks_a_deleted_video_for_the_first_review(journal, tmp_path, monkeypatch, capsys):
+    journal(done=[REC])
+    for name, value in {"MUSIC": tmp_path / "music", "PLAYLISTS": tmp_path / "playlists",
+                        "DATA": tmp_path / "music-data" / "liveplaylists", "CACHE": tmp_path / "cache"}.items():
+        monkeypatch.setattr(lp, name, value)
+    monkeypatch.setattr(lp, "listing", lambda url: {"title": "T", "entries": [{"id": YT, "title": "Song"},
+                                                                             {"id": "other000001", "title": "Other"}]})
+    with pytest.raises(SystemExit):
+        lp.main(["add", "https://www.youtube.com/playlist?list=PLtest0000000000000001", "--json"])
+    items = lp.load("yt-PLtest0000000000000001")["items"]
+    assert items[YT]["deleted"]["id"] == REC["id"] and items["other000001"]["deleted"] is None
