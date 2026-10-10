@@ -24,7 +24,7 @@ fingerprints only; the JSON lists the files still missing (`fingerprint` compute
 """
 import argparse, collections, datetime as dt, json, re, sys
 
-from . import audiomatch, musicdb
+from . import audiomatch, external, musicdb
 
 VERSIONS = ("original", "live", "remix", "edit", "cover", "other")
 MARKERS = {"live": r"\blive\b|\bunplugged\b|\bacoustic\b", "remix": r"\bremix\b|\brmx\b|\bbootleg\b",
@@ -279,7 +279,7 @@ def same_suggestions(pairs, rows):
 def fingerprint(_a=None):
     """Fingerprint the files of every group not in the cache yet (`--json` only reads the cache)."""
     if not audiomatch.available():
-        sys.exit("fingerprint: fpcalc not found (brew install chromaprint)")
+        sys.exit(external.missing("fpcalc", "fingerprint"))
     lib = musicdb.library()
     files = sorted({f for fs in lib[2].values() if len(fs) > 1 for f in fs})
     done, failed = audiomatch.compute(files)

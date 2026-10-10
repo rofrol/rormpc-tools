@@ -93,6 +93,7 @@ def replaygain(path):
     """Track ReplayGain tags (rsgain, -18 LUFS) so MPD's `replaygain "track"` evens out loudness. Optional: without
     rsgain, MPD falls back to replaygain_missing_preamp."""
     if not shutil.which("rsgain"):
+        external.optional("rsgain")
         return
     p = subprocess.run(["rsgain", "custom", "-s", "i", "-l", "-18", "-q", str(path)], capture_output=True, text=True)
     if p.returncode:  # loudness tags must not lose the download

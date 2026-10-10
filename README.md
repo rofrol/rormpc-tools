@@ -22,8 +22,8 @@ rormpc's `scripts/rormpc_install.sh companions` installs the pinned version and 
 (and the scrobbler and `mpd-player`) as launchd agents or systemd user units. For a checkout:
 `uv tool install --editable .`.
 
-Needs MPD with `sticker_file` set (stickers hold the counts), `mpc`; `yt-mp3-mb` needs `yt-dlp` and `ffmpeg`,
-`fpcalc` (AcoustID) and `rsgain` (ReplayGain tags for MPD's `replaygain "track"`) are optional. When neither the video's MusicBrainz link nor AcoustID knows a song, `yt-mp3-mb`
+Needs MPD with `sticker_file` set (stickers hold the counts) and the programs under [Dependencies](#dependencies).
+When neither the video's MusicBrainz link nor AcoustID knows a song, `yt-mp3-mb`
 asks Shazam through `shazamio` (an unofficial API: answers are cached, a Shazam-only match is always confirmed by
 you, never written on its own). ListenBrainz features read the token from the
 [listenbrainz-mpd](https://codeberg.org/elomatreb/listenbrainz-mpd) config (or `$LISTENBRAINZ_TOKEN`), and the calls
@@ -43,6 +43,34 @@ playlists. It is off until you set it up once (`yt-playlist --help` has the deta
    music playlists to clean up.
 
 A "Testing" app's login expires after 7 days; the next run from a terminal logs in again.
+
+## Dependencies
+
+A missing program ends a command with one line: `<tool>: <program> not found on PATH; <what needs it>. Install:`
+and a link here. An optional one is reported once per run with what stops working. The tools pick no package
+manager for you; take the package from your system's column.
+
+| Program | What needs it | | Homebrew (macOS) | Debian/Ubuntu (`apt`) | Arch (`pacman`) | Guix |
+|---|---|---|---|---|---|---|
+| `mpd` | everything (the stickers hold the counts) | required | `mpd` | `mpd` | `mpd` | `mpd` |
+| `mpc` | MPD database updates, the current song | required | `mpc` | `mpc` | `mpc` | `mpclient` |
+| `ffmpeg` | audio hashes, covers, mp3 conversion (`yt-mp3-mb`, `musicdb update`) | required | `ffmpeg` | `ffmpeg` | `ffmpeg` | `ffmpeg` |
+| `yt-dlp` | YouTube searches and downloads (`yt-mp3-mb`, `liveplaylist`, `hits fetch`) | required for those | `yt-dlp` | `yt-dlp` ¹ | `yt-dlp` | `yt-dlp` |
+| `git` | commits of the history directory | required | `git` | `git` | `git` | `git` |
+| `fpcalc` | AcoustID matching, the Versions audio comparison | optional | `chromaprint` | `libchromaprint-tools` | `chromaprint` | `chromaprint` ² |
+| `rsgain` | ReplayGain tags on downloads | optional | `rsgain` | `rsgain` ² | `rsgain` ² | ² |
+| `terminal-notifier` | failure notifications on macOS (else `osascript`) | optional | `terminal-notifier` | — | — | — |
+| `notify-send` | failure notifications on Linux | optional | — | `libnotify-bin` | `libnotify` | `libnotify` |
+| C compiler, `pkg-config`, OpenSSL and SQLite headers | building the scrobbler (rormpc's `rormpc_install.sh companions`) on Linux | required there | — | `build-essential pkg-config libssl-dev libsqlite3-dev` | `base-devel openssl sqlite` | `gcc-toolchain pkg-config openssl sqlite` |
+
+- Homebrew: `brew install <package>`; Debian/Ubuntu: `sudo apt install <package>`; Arch: `sudo pacman -S <package>`.
+- Guix: `guix install <package>` now; to keep it, add the package to your Guix Home `home.scm` (`packages`) or a
+  manifest (`guix package -m manifest.scm`).
+- ¹ Debian's and Ubuntu's `yt-dlp` can lag behind YouTube's changes; `uv tool install yt-dlp` gives the current one.
+- ² Not verified: whether this package exists in that distribution's main repositories (`rsgain` may be in Arch's
+  AUR only, and Guix may have none) and, for Guix's `chromaprint`, whether it ships `fpcalc`. Check with your
+  package manager's search.
+- Windows is not supported.
 
 ## Settings
 

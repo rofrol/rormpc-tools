@@ -9,11 +9,11 @@ Evidence per track (strongest first):
   - ListenBrainz metadata lookup on artist/title parsed from the video title.
 decide() ranks candidate recordings, resolve() turns the best one into canonical MB names.
 """
-import hashlib, json, os, pathlib, re, subprocess, sys, time, unicodedata, urllib.error, urllib.parse, urllib.request
+import hashlib, json, os, pathlib, re, shutil, subprocess, sys, time, unicodedata, urllib.error, urllib.parse, urllib.request
 from difflib import SequenceMatcher
 from http.client import IncompleteRead  # not `import http.client`: http() below would shadow the module
 
-from . import settings
+from . import external, settings
 
 UA = f"rormpc-tools/0.1 ( {settings.CONTACT} )"
 ACOUSTID_KEY = "1vOwZtEn"  # public client key embedded in beets' chroma plugin
@@ -155,6 +155,9 @@ def mb_url(ytid):
 
 
 def acoustid(path):
+    if not shutil.which("fpcalc"):
+        external.optional("fpcalc")
+        return {"error": "fpcalc not found on PATH"}
     try:
         out = subprocess.run(["fpcalc", "-json", "-length", "120", str(path)], capture_output=True, text=True, timeout=120)
         fp = json.loads(out.stdout)
