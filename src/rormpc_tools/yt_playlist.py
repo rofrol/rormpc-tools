@@ -5,6 +5,7 @@
   yt-playlist use ID [ID ...]          # the music playlists musicdb deletions should clean up
   yt-playlist find VIDEO_ID [--json]   # which of those playlists contain the video (--json: with titles)
   yt-playlist remove VIDEO_ID [--dry-run]   # remove the video from those playlists
+  yt-playlist add VIDEO_ID --playlist ID [...]  # put it back (musicdb restore): appended, skipped where it is
   yt-playlist index [--json]           # cache which videos the chosen playlists hold (musicdb update: daily)
 
 When the login has expired, `find --json` answers from the cached index and says when it was checked
@@ -14,7 +15,8 @@ Setup (once): Google Cloud project with "YouTube Data API v3" enabled, OAuth con
 screen in "Testing" with yourself as a test user, an OAuth client of type "Desktop app", its JSON saved as
 youtube-client.json in secrets_dir (settings). Testing apps get refresh tokens that expire after 7 days, so a
 run from a terminal opens the browser to log in again when needed (publishing would need a privacy policy). Playlist choice is kept in
-$MUSICDB_DATA/youtube-playlists.json. Quota: a list page costs 1 unit, a removal 50 (10,000 a day).
+$MUSICDB_DATA/youtube-playlists.json. Quota: a list page costs 1 unit, a removal or an insertion 50 (10,000 a
+day).
 """
 import argparse, datetime as dt, json, sys
 
@@ -88,6 +90,23 @@ def items_with(yt, video_id):
     return out
 
 
+def add(yt, video_id, playlist_ids):
+    """Append the video to each playlist that does not hold it yet (looked up first, so a rerun never adds it
+    twice): {"video", "items": {playlist id: [playlist item ids]}, "added": [...], "present": [...]}."""
+    out = {"video": video_id, "items": {}, "added": [], "present": []}
+    for pid in playlist_ids:
+        have = [it["id"] for it in pages(yt.playlistItems().list, part="id", playlistId=pid, videoId=video_id)]
+        if have:
+            out["present"].append(pid)
+        else:
+            it = yt.playlistItems().insert(part="snippet", body={"snippet": {
+                "playlistId": pid, "resourceId": {"kind": "youtube#video", "videoId": video_id}}}).execute()
+            have = [it["id"]]
+            out["added"].append(pid)
+        out["items"][pid] = have
+    return out
+
+
 def build_index(yt):
     """{checked_at, playlists: {id: {title, items: {video id: [playlist item ids]}}}} of the chosen playlists,
     written atomically. A list page costs 1 quota unit per 50 videos."""
@@ -125,6 +144,7 @@ def main():
     p = sp.add_parser("use"); p.add_argument("ids", nargs="+")
     p = sp.add_parser("find"); p.add_argument("video"); p.add_argument("--json", action="store_true")
     p = sp.add_parser("remove"); p.add_argument("video"); p.add_argument("--dry-run", action="store_true")
+    p = sp.add_parser("add"); p.add_argument("video"); p.add_argument("--playlist", action="append", required=True)
     p = sp.add_parser("index"); p.add_argument("--json", action="store_true")
     a = ap.parse_args()
     if a.cmd == "find" and a.json:
@@ -142,6 +162,12 @@ def main():
         out = build_index(api())
         n = sum(len(pl["items"]) for pl in out["playlists"].values())
         print(json.dumps(out, ensure_ascii=False) if a.json else f"indexed {len(out['playlists'])} playlists, {n} videos -> {INDEX}")
+        return
+    if a.cmd == "add":
+        out = add(api(), a.video, a.playlist)
+        for pid in out["added"]:
+            print(f"added {a.video} to {pid}")
+        print(json.dumps(out))
         return
     if a.cmd == "auth":
         api(interactive=True)

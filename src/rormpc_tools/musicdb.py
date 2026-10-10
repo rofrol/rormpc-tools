@@ -17,6 +17,8 @@
                                         # also deletes the history (LB listens: irreversible, YouTube playlists)
   musicdb delete --preview [--youtube] [FILE...]  # JSON: plays, LB listens, YouTube playlists; changes nothing
   musicdb undo                          # rmpc key: restore the most recently trashed song (repeatable)
+  musicdb restore ID [--yes]            # any deletion back: file (Trash or downloaded again), stickers, history,
+                                        # ListenBrainz listens, YouTube playlists; dry run without --yes
   musicdb keep|unkeep [FILE...]         # not a deletion candidate: drop it from the "Not finished" playlist
   musicdb tag add|remove|list|of ...   # hand-made lists (God, melancholic, ...); musicdb tag --help
   musicdb genre add|exclude|reset GENRE --current   # correct a song's MusicBrainz genres
@@ -780,6 +782,9 @@ def update(a):
         print(f"ListenBrainz: paused after {st['failures']} failed runs, next try after "
               f"{dt.datetime.fromtimestamp(st['next']).strftime('%H:%M')}")
     deletions(argparse.Namespace(retry=True, json=False))
+    if not LB_PAUSED[0]:
+        from . import restore
+        network(restore.retry, lb=True)  # restores whose ListenBrainz or YouTube step waits or failed
     rep = identity.sync()  # new downloads get an id, renamed files keep theirs
     print(identity.summary(rep))
     if rep["tagged"]:
@@ -1207,9 +1212,10 @@ def deletions(a):
         print(f"{a.id}: " + ("may be downloaded again" if a.action == "allow" else "never downloaded again"))
         return
     if a.json and getattr(a, "all", False):
-        from . import deleted
-        ok = deleted.allowed()
-        print(json.dumps([journal_row(r) | {"download": block_row(deleted.entry(r), r["id"] in ok)}
+        from . import deleted, restore
+        ok, restored = deleted.allowed(), restore.records()
+        print(json.dumps([journal_row(r) | {"download": block_row(deleted.entry(r), r["id"] in ok),
+                                            "restore": restore.state_of(r["id"], restored)}
                           for r in jsonl(PENDING) + jsonl(DONE)], ensure_ascii=False)); return
     if a.json:
         print(json.dumps(rows, ensure_ascii=False)); return
@@ -1281,6 +1287,9 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "chart":
         from . import chart
         return chart.main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "restore":
+        from . import restore
+        return restore.main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "identity":
         return identity.main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "versions":

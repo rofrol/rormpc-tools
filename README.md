@@ -6,7 +6,7 @@ They work from the shell too; each one's usage is in its `--help`.
 | Command | What it does |
 |---|---|
 | `hits` | Billboard year-end chart hits by decade or years (a seed of the MusicBrainz matches ships with the package, see `src/rormpc_tools/data/LICENSES.md`; the hourly `musicdb update` fills gaps, e.g. a new chart year, 30 lookups at a time), genre filter (MusicBrainz), what you own; `--json` feeds rormpc's Hits pane, `--playlist` writes an MPD playlist; `hits fetch` is a verified import queue for the missing ones; `hits genres` counts the library's genres and pins the Hits checkboxes, `hits genres of FILE` lists one song's |
-| `musicdb` | play history (ListenBrainz, MPD log, Takeout, Spotify export) -> MPD stickers `plays`, `lastPlayed`, `skips` and mpd-player's shuffle weights; likes to ListenBrainz; `delete` / `undo` behind rormpc's Ctrl-x / Ctrl-y |
+| `musicdb` | play history (ListenBrainz, MPD log, Takeout, Spotify export) -> MPD stickers `plays`, `lastPlayed`, `skips` and mpd-player's shuffle weights; likes to ListenBrainz; `delete` / `undo` behind rormpc's Ctrl-x / Ctrl-y, `restore` behind its Deleted overlay |
 | `musicdb chart` | a standalone HTML page: my top 10 of each listening year as an animated bar chart race (the weighted shuffle's own picks left out), how my most played songs rose and fell (top 10 ranks, top 100 shares), which source the plays come from |
 | `musicdb lyrics` | lyrics from LRCLIB into `lyrics_dir` (`.lrc` synced, `.txt` plain) for rormpc's Lyrics pane; `candidates` / `use` pick another entry; `translate` takes one song's Polish translation from tekstowo.pl on request (personal use: one song per call, cached in `<song>.pl.json`, never committed anywhere), or when it has none a literal line-by-line machine translation by Claude through the Claude Code CLI (`claude -p` with its own login, no API key; the lyrics go to Anthropic; model: `translate_model`), `lang` overrides the detected language |
 | `mpd-player` | the playback daemon (runs with rormpc closed): silence between songs, Up next, weighted shuffle by plays and likes with "heard enough" cooldowns, pause for a while (plays on at a wall-clock deadline unless anyone did anything meanwhile); commands over MPD messages on channel `rormpc`, see its `--help` |
@@ -146,6 +146,14 @@ history is kept, the ListenBrainz user (default: the token's owner) and when you
   (ListenBrainz listens, YouTube playlist entries) goes only with `--listenbrainz`, and failed remote steps are
   retried by `musicdb update`. Deleted events become tombstones that re-imports skip. Listens of a recording that
   another library file still has are not deleted.
+- `musicdb restore ID` brings any deletion back (dry run without `--yes`, rormpc's Deleted overlay shows its plan):
+  the file at its old path (from the Trash, else the same YouTube video downloaded again into a staging dir, put in
+  only when the video id, the length and the recording agree with the journal), its song id, stickers and local
+  plays, the YouTube playlist entries, and only the ListenBrainz listens the deletion deleted, with their original
+  time. ListenBrainz deletes asynchronously, so a listen is submitted only after the deleted one is no longer
+  listed at its second; "submitting" is journaled before the POST and an unconfirmed submission is never sent again
+  on its own (`--lb-resubmit`). Every step's state is in `deletions/restored.jsonl`; a rerun or `musicdb update`
+  continues. What cannot come back is reported: the playlist position, a fingerprint check of the old audio.
 - A deleted song is never downloaded again. The block list is derived from the deletion journal (every deletion,
   Trash or permanent, the ones made before the block list existed included; `musicdb undo` lifts it with the
   record), never kept apart from it. It matches the YouTube video exactly, in every downloader before anything is
