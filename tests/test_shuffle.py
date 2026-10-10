@@ -292,6 +292,22 @@ def test_heard_enough_on_the_head_plans_again_without_it():
 
 
 
+def test_a_song_appended_to_a_hits_source_joins_its_round_even_after_it_was_done():
+    src = {"kind": "hits", "name": "80s", "len": 2, "files": ["b", "c"], "rules_hash": "h1"}
+    d, mpd, sh = setup(files=("x", "b", "c"), data={"b": heard(3), "c": heard(3)}, source=src)
+    play(d, mpd, "b")
+    play(d, mpd, "c")
+    assert sh.round["done"] and sh.round["heard"] == ["b", "c"]
+    # rormpc's Browse appends "z" with weighted on: source.json lists it in `added`, the rules hash stays
+    mpd.q.append({"id": "9", "file": "z", "prio": 0})
+    player.write_state("source", {"source": {**src, "len": 3, "added": ["z"]}})
+    asyncio.run(d.step({"playlist"}))
+    assert sh.round["source"] == "hits:h1" and not sh.round["done"] and sh.round["total"] == 3
+    assert [e["file"] for e in sh.plan] == ["z"]
+    play(d, mpd, "z")
+    assert sh.round["heard"] == ["b", "c", "z"]
+
+
 def test_a_round_takes_only_the_snapshot_not_the_song_playing_at_the_switch():
     d, mpd, sh = setup(files=("x", "b", "c"), data={"c": heard(3)},
                        source={"kind": "hits", "name": "80s", "len": 2, "files": ["b", "c"]})

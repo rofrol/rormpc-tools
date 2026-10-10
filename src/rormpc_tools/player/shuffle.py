@@ -23,6 +23,8 @@ Up next requests, so MPD itself plays them in order; rormpc shows the plan in it
 "hits"), a round plays each song once (hard rule); when all were heard it stops and says so; `shuffle newround`.
 The round's key is source.json's `rules_hash` (rormpc's Play: the same rules keep the round, other rules start a
 new one), else its name; the song playing across the switch is outside the source's files and never in the round.
+Songs appended by hand to a Hits source (source.json `added`, rormpc's Browse `a`) join its files and the round; one
+appended after the round was done opens it again.
 Previous (`shuffle prev [CMD_ID]`, the media key through this daemon) walks back through the songs that really
 played (the trail, by queue id) and this mode never sends MPD `previous`. Each press goes one song further back from
 the cursor; a trail entry no longer in the queue is passed over; at the start of the trail nothing happens; the song
@@ -200,10 +202,16 @@ class Shuffle(Module):
         return src.get("kind"), src.get("rules_hash") or src.get("name")
 
     def round_members(self):
-        """The files of a Hits source's snapshot, or None (an older source.json: every queued song). The song that
-        was playing when the source was applied stays outside it (off-source) and never counts in the round."""
-        files = ((read_state("source") or {}).get("source") or {}).get("files")
-        return set(files) if files else None
+        """The files of a Hits source's snapshot plus the songs appended to it by hand (`added`), or None (an older
+        source.json: every queued song). The song that was playing when the source was applied stays outside it
+        (off-source) and never counts in the round."""
+        src = (read_state("source") or {}).get("source") or {}
+        files = src.get("files")
+        return set(files) | set(src.get("added") or ()) if files else None
+
+    def appended(self):
+        """The files appended by hand to the source (source.json `added`)."""
+        return list(((read_state("source") or {}).get("source") or {}).get("added") or ())
 
     def source_key(self):
         kind, name = self.source_scope()
@@ -412,6 +420,8 @@ class Shuffle(Module):
             # the total is known now when the source lists its files (a full plan may not draw again for a while)
             members = self.round_members()
             self.round = {"source": key, "heard": [], "total": len(members) if members else 0, "done": False}
+        elif self.round.get("done") and any(f not in self.round["heard"] for f in self.appended()):
+            self.round["done"] = False  # a song appended after the round was done: it still plays once
         return source_changed
 
     # ------------------------------------------------------------ watching playback
