@@ -424,10 +424,17 @@ def entries(years):
     return songs
 
 
+def year_bounds(part, first, last):
+    """'1985-1992', '1987', or an open end ('-1991', '2000-') -> (lo, hi); an open end is first or last."""
+    lo, dash, hi = part.strip().partition("-")
+    lo = int(lo) if lo.strip() else first
+    return lo, int(hi) if hi.strip() else last if dash else lo
+
+
 def range_years(part):
-    """'1985-1992' or '1987' -> years with a finished year-end chart."""
-    lo, _, hi = part.partition("-")
-    return range(max(int(lo), FIRST_YEAR), min(int(hi or lo), dt.date.today().year - 1) + 1)
+    """'1985-1992', '1987', '-1991' or '2000-' -> years with a finished year-end chart."""
+    lo, hi = year_bounds(part, FIRST_YEAR, dt.date.today().year - 1)
+    return range(max(lo, FIRST_YEAR), min(hi, dt.date.today().year - 1) + 1)
 
 
 def coverage(decade):
@@ -747,12 +754,13 @@ def candidates(years, a, lib, plays, last):
 
 
 def period_years(part, rules):
-    """'1985-1992' or '1987' -> years on the rules' axis: finished year-end charts for the chart year, the year in
-    progress included for listening and release years."""
+    """'1985-1992', '1987', '-1991' or '2000-' -> years on the rules' axis: finished year-end charts for the chart
+    year, the year in progress included for listening and release years (an open start is year 1: undated songs
+    stay out)."""
     if rules.years_of == "chart":
         return list(range_years(part))
-    lo, _, hi = part.strip().partition("-")
-    return list(range(int(lo), int(hi or lo) + 1))
+    lo, hi = year_bounds(part, 1, dt.date.today().year)
+    return list(range(lo, hi + 1))
 
 
 def decade_axis_years(d, rules):

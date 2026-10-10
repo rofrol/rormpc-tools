@@ -144,6 +144,29 @@ def test_a_blocked_list_never_runs_and_keeps_its_last_export(lib, monkeypatch, t
         musicdb.smart_lists()  # `musicdb update` reports it among the failed steps
 
 
+def test_an_open_ended_period_filters_and_saves(lib, monkeypatch, tmp_path):
+    files = lambda argv: [r["file"] for r in result([*LIBRARY, *argv], monkeypatch, tmp_path)["rows"]]
+    assert files(["--years", "-1991"]) == ["a", "b", "c"]  # released 1987
+    assert files(["--years", "1987-"]) == ["a", "b", "c"]
+    assert files(["--years", "2000-"]) == []
+    assert files(["--years", "-1986"]) == []
+    assert files(["--years", "1987"]) == ["a", "b", "c"]  # one year, as before
+    run(["lists", "create", "Old", *LIBRARY, "--years", "-1991"], monkeypatch)
+    assert sl.find("Old")["rules"]["period"] == "-1991" and sl.find("Old")["blocked"] is None
+
+
+def test_open_year_bounds():
+    assert hits.year_bounds("1985-1992", 1, 2026) == (1985, 1992)
+    assert hits.year_bounds("1987", 1, 2026) == (1987, 1987)
+    assert hits.year_bounds("-1991", 1, 2026) == (1, 1991)
+    assert hits.year_bounds("2000-", 1, 2026) == (2000, 2026)
+    chart = hr.resolve(None, ["+billboard"], "billboard", "chart")
+    assert hits.period_years("-1961", chart) == [1959, 1960, 1961]  # chart years start with the first chart
+    assert hits.period_years("2020-", chart)[-1] == hits.dt.date.today().year - 1  # finished charts only
+    assert all(sl.YEARS.match(p) for p in ["1985-1992", "-1991", "2000-", "1980-1989,2000-"])
+    assert not any(sl.YEARS.match(p) for p in ["-", "1991--", "-1991-"])
+
+
 def test_list_and_rules_take_no_filter_options(lib, monkeypatch):
     run(["lists", "create", "Mine", *LIBRARY], monkeypatch)
     with pytest.raises(SystemExit, match="drop --years, --top"):

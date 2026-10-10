@@ -30,7 +30,7 @@ PREFIX = "Smart "
 NEWER = "made by a newer rormpc-tools, update it"
 FIELDS = ("schema", "sets", "rank", "years_of", "period", "top", "genres", "artists", "owned")
 DECADE = re.compile(r"^(\d{2}|\d{4})s$|^all$")
-YEARS = re.compile(r"^\d{4}(-\d{4})?(,\d{4}(-\d{4})?)*$")
+YEARS = re.compile(r"^(\d{4}(-\d{4})?|-\d{4}|\d{4}-)(,(\d{4}(-\d{4})?|-\d{4}|\d{4}-))*$")  # an end may be open
 
 
 def log_path():

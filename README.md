@@ -42,6 +42,7 @@ period), before sets, genres and artists, so a song's rank never depends on them
 ```sh
 hits 1980s --set +billboard --set +likes --set -playlists --top 1-10   # (Billboard ∪ Likes) − Playlists
 hits --years 1990-1999 --rank plays --years-of release --top 1-10     # my most played songs released then
+hits --years -1991 --rank plays --years-of release                    # an open end: released up to 1991
 hits --set +likes --rank rediscover
 hits sets; hits exceptions; hits lists                                 # read only
 ```
