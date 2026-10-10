@@ -71,6 +71,36 @@ def test_my_plays_rank_leaves_out_the_shuffles_picks_with_every_years_of(monkeyp
         assert [r["score"] for r in rows] == [3, 2]
 
 
+def test_the_play_history_split_is_reused_across_runs_until_the_history_changes(monkeypatch, tmp_path):
+    db = tmp_path / "plays.db"
+    db.write_text("v1")
+    monkeypatch.setattr(musicdb, "DB", db)
+    monkeypatch.setattr(musicdb, "db", lambda: None)
+    passes = []
+    stamps = {"a": ["2016-03-01T10:00:00", "2016-04-01T10:00:00"], "b": ["2016-05-01T10:00:00"]}
+
+    def counted(c, lib, st=None):
+        passes.append(1)
+        st.update(stamps)
+    monkeypatch.setattr(musicdb, "counted", counted)
+    pick = musicdb.ts_epoch("2016-05-01T10:00:00") - 10
+    monkeypatch.setattr(musicdb, "auto_starts", lambda: {"b": [pick]})
+    lib = ({}, {}, {"k": {"a", "b"}})
+    split = lambda: hits.shuffle_split(args(rank="plays", years_of="listened"), lib)  # a new run each call
+    first = split()
+    assert first == ({"a": stamps["a"]}, {"b": 1}) and len(passes) == 1
+    assert split() == first and len(passes) == 1, "the second run reads the cached split"
+    db.write_text("v2, a new play")  # the history changed: split again
+    assert split() == first and len(passes) == 2
+    assert split() == first and len(passes) == 2
+    lib[2]["k"].add("c")  # a new library file may match plays that matched nothing before
+    split()
+    assert len(passes) == 3
+    hits.split_cache().write_text("{not json")  # a broken cache is computed again, never an error
+    split()
+    assert len(passes) == 4
+
+
 def test_library_ranks_every_song_by_plays(monkeypatch):
     no_play_log(monkeypatch)
     monkeypatch.setattr(hits, "library_songs", lambda: {"a": song("a"), "b": song("b"), "c": song("c")})

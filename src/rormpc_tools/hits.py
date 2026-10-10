@@ -37,7 +37,7 @@ years only break ties. Genres come from the recording's
 MusicBrainz genres/tags, falling back to the artist's. Library matching and play counts reuse musicdb.
 Caches: ~/.cache/hits/.
 """
-import argparse, collections, datetime as dt, json, os, pathlib, re, subprocess, sys, time, urllib.parse, urllib.request
+import argparse, collections, datetime as dt, hashlib, json, os, pathlib, re, subprocess, sys, tempfile, time, urllib.parse, urllib.request
 
 from . import deleted, external, hits_exceptions, hits_rules, hits_sets, mbtag, musicdb, settings
 
@@ -639,11 +639,44 @@ def chart_candidates(cands, members, years, a, lib, plays):
         c["listens"] = pop.get(c.get("mbid"), 0)
 
 
+SPLIT_VERSION = 1  # bump when the split's rule changes: a cached split of the old rule is not reused
+
+
+def split_cache():
+    return CACHE / "my-plays-split.json"
+
+
+def split_key(lib):
+    """What the play-history split is computed from: the play DB (and its WAL), the shuffle's auto log, the path
+    logs event_file maps plays through (aliases, identity registry, version decisions) and the library's files.
+    A change to any of them gives another key."""
+    paths = [musicdb.DB, pathlib.Path(f"{musicdb.DB}-wal"), musicdb.auto_log(), musicdb.DATA / "aliases.jsonl",
+             musicdb.DATA / "songs.jsonl", musicdb.DATA / "versions.jsonl"]
+    stats = []
+    for p in paths:
+        try:
+            st = p.stat()
+            stats.append([str(p), st.st_mtime_ns, st.st_size])
+        except FileNotFoundError:
+            stats.append([str(p), None, None])
+    files = sorted(musicdb.library_files(lib)) if lib else []
+    return hashlib.sha256(json.dumps([SPLIT_VERSION, stats, files]).encode()).hexdigest()
+
+
 def shuffle_split(a, lib):
     """Each library file's play timestamps split by who chose the song, gathered once per run: ({file: [ts] of my
     own plays}, {file: number of plays the weighted shuffle picked itself}). The shuffle's picks show what the
-    algorithm chose, not me, so my plays leave them out with every Years of."""
+    algorithm chose, not me, so my plays leave them out with every Years of. Kept across runs in the cache under
+    `split_key`: a run with the same play history reuses it instead of matching every play again."""
     if getattr(a, "own_plays", None) is None:
+        key, path = split_key(lib), split_cache()
+        try:
+            saved = json.loads(path.read_text())
+        except (OSError, ValueError):
+            saved = {}
+        if saved.get("key") == key:
+            a.own_plays, a.shuffle_picks = saved["own"], collections.Counter(saved["picked"])
+            return a.own_plays, a.shuffle_picks
         stamps = {}
         musicdb.counted(musicdb.db(), lib, stamps)
         auto, own, picked = musicdb.auto_starts(), {}, collections.Counter()
@@ -655,6 +688,11 @@ def shuffle_split(a, lib):
                 else:
                     own.setdefault(f, []).append(t)
         a.own_plays, a.shuffle_picks = own, picked
+        # atomic, and a name of its own: two runs at once never read a half-written split or share a temp file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=path.name, suffix=".tmp", delete=False) as fh:
+            json.dump({"key": key, "own": own, "picked": picked}, fh)
+        os.replace(fh.name, path)
     return a.own_plays, a.shuffle_picks
 
 

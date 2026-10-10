@@ -76,3 +76,11 @@ def env(tmp_path, monkeypatch):
 
     install()
     return install
+
+
+@pytest.fixture(autouse=True)
+def fresh_split_cache(tmp_path, monkeypatch):
+    """hits' play-history split is cached across runs: each test starts without one, so a split another test
+    computed (with other monkeypatched plays under the same key) is never reused."""
+    from rormpc_tools import hits
+    monkeypatch.setattr(hits, "split_cache", lambda: tmp_path / "split-cache" / "my-plays-split.json")

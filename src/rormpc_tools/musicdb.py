@@ -600,10 +600,15 @@ def ts_epoch(ts):
     return (d.replace(tzinfo=TZ) if TZ else d).timestamp()
 
 
+def auto_log():
+    """mpd-player's log of the songs its shuffle picked itself."""
+    return pathlib.Path(os.environ.get("XDG_STATE_HOME") or settings.HOME / ".local/state") / "rormpc/auto.jsonl"
+
+
 def auto_starts():
     """{file: [start times]} of the songs mpd-player's shuffle picked itself (its auto.jsonl): their plays are
     exposure, not preference, so they don't raise a song's weight."""
-    p = pathlib.Path(os.environ.get("XDG_STATE_HOME") or settings.HOME / ".local/state") / "rormpc/auto.jsonl"
+    p = auto_log()
     out, al = collections.defaultdict(list), aliases()
     for r in jsonl(p) if p.exists() else []:
         out[al.get(r["file"], r["file"])].append(float(r["start"]))
