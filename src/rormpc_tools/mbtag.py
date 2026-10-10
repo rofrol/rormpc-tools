@@ -436,21 +436,31 @@ def write_tags(path, row, album=None):
         # MPD maps this UFID to MUSICBRAINZ_TRACKID; listenbrainz-mpd sends it as recording_mbid
         t.add(UFID(owner="http://musicbrainz.org", data=row["mbid"].encode("ascii")))
         t.add(TXXX(encoding=3, desc="MusicBrainz Artist Id", text=row["artist_mbids"]))
-    write_year(t, row.get("first_release"))
+    original = None
+    if row.get("mbid") and row.get("first_release"):
+        from . import years
+        original = years.for_download(row)
+    write_year(t, row.get("first_release"), original, row.get("mbid"))
     t.save(path)
 
 
-def write_year(t, first_release):
-    """TDRC/TDOR = the recording's first release date on MusicBrainz, so players sort and group by real year.
+def write_year(t, first_release, original=None, mbid=None):
+    """TDRC = the recording's own first release date on MusicBrainz; TDOR = the song's original release
+    (`original`: (date, source recording MBID, rule) from years.for_download), else the same first release.
+    Provenance: TXXX:DATE_SOURCE "musicbrainz:<recording>" and TXXX:DATE_RULE (the rule, or "first-release").
     yt-dlp puts the YouTube upload date (YYYYMMDD) into TDRC; keep it in TXXX:YouTube Upload Date instead."""
     from mutagen.id3 import TDRC, TDOR, TXXX
     old = str(t.get("TDRC") or "")
     if re.fullmatch(r"\d{8}", old) and not t.get("TXXX:YouTube Upload Date"):
         t.add(TXXX(encoding=3, desc="YouTube Upload Date", text=[old]))
     if re.fullmatch(r"\d{8}", old) or first_release:
-        t.delall("TDRC"); t.delall("TDOR")
+        t.delall("TDRC"); t.delall("TDOR"); t.delall("TXXX:DATE_SOURCE"); t.delall("TXXX:DATE_RULE")
     if first_release:
-        t.add(TDRC(encoding=3, text=[first_release])); t.add(TDOR(encoding=3, text=[first_release]))
+        date, source, rule = original or (first_release, mbid, "first-release")
+        t.add(TDRC(encoding=3, text=[first_release])); t.add(TDOR(encoding=3, text=[date]))
+        if source:
+            t.add(TXXX(encoding=3, desc="DATE_SOURCE", text=[f"musicbrainz:{source}"]))
+            t.add(TXXX(encoding=3, desc="DATE_RULE", text=[rule]))
 
 
 # ---------------------------------------------------------------- cover art

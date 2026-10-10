@@ -1,6 +1,9 @@
 # Release years: measurement and repair plan
 
-Status: plan only. No tag has been changed; the open choices at the end need a decision first.
+Status: decided 2026-10-10 (see "Decisions" at the end). Stage A is built: `musicdb years` (src/rormpc_tools/years.py)
+computes the rule, writes the dry-run report, records decisions by id, applies and rolls back; `hits` reads
+`originaldate`; `write_year` writes TDOR from the rule on new downloads. Stage B: rormpc's "Years to review" view
+and its MBID picker; stage C: the video-to-audio swap through the work on download.
 
 ## The problem
 
@@ -68,7 +71,8 @@ Precision, checked by hand against well-documented release years for the 37 samp
   here), as MusicBrainz gives it for the recording the file really is.
 - Never the YouTube upload date, which stays in `TXXX:YouTube Upload Date`.
 - Provenance: `TXXX:DATE_SOURCE = musicbrainz:<recording MBID>` naming the recording the TDOR came from, and
-  `TXXX:DATE_RULE` naming the rule (`same-length`, `any-clean`, `own`).
+  `TXXX:DATE_RULE` naming the rule (`same-length`, `any-clean`, `own`), or `first-release` when a download kept its
+  recording's own first release (the rule had no proposal, or a later one).
 
 ## Computation: a hybrid, with the evidence
 
@@ -109,8 +113,10 @@ else is **review**. A proposal later than the current year is never applied with
   In an earlier retag's evidence, 60 matches were video recordings and at least 24 had such an alternative.
 - Next: when no alternative is an audio recording, find one through the work (as in the rule above) instead of
   keeping the video; a DJ-mix segment gets the same treatment.
-- `write_year` writes TDRC = the recording's own first release and TDOR = the rule's result, with `DATE_SOURCE`
-  and `DATE_RULE`, instead of the same date twice.
+- Done: `write_year` writes TDRC = the recording's own first release and TDOR = the rule's result, with
+  `DATE_SOURCE` and `DATE_RULE`, instead of the same date twice. A download is not reviewed, so a proposal later
+  than the recording's own first release is not taken (8 of 9 later proposals were wrong): TDOR stays that first
+  release, rule `first-release`.
 
 ## Dry-run report
 
@@ -127,19 +133,27 @@ go at the top. Nothing is written in a dry run.
 
 ## Review flow
 
-- The report is the review list: high-confidence rows are pre-accepted, review rows pre-rejected; the user flips
-  rows by id (`--accept 3 7 12`, `--reject 5`), as an earlier one-off review of undated files worked.
-- In rormpc later (optional): a "Years to review" view over `years-report.json` with accept/reject keys, writing the
-  decisions back; the apply step stays in rormpc-tools.
+- The report is the review list. Every row starts `undecided` (decided: review every row); `--accept 3 7 12`,
+  `--reject 5`, `--undecide 4` record decisions with their time. Row ids are stable: a rerun keeps a file's id (by
+  its registry id, else its path) and its decision while the proposal, md5 and current tags are the same; any
+  change sends the row back to `undecided`.
+- Rows: files whose shown year (TDOR, else TDRC) would change; rows without a proposal (no work relationship: "needs
+  MBID"; no MusicBrainz recording in the tags: "needs MBID"; recording not found; nothing studio found); and rows
+  whose year holds but whose release group is dated earlier (`keeps-year`, e.g. reissue-only recordings).
+- `--mbid ROW MBID` names the recording a file is (until stage B's picker): the row is computed again from it, kept
+  across reruns, and needs a new decision. It changes only the year's source, not the file's recording tag.
+- rormpc's "Years to review" view (stage B) reads `musicdb years --json` (the report, `version` 1) and writes
+  decisions through `--accept` / `--reject` / `--mbid`; the apply step stays in rormpc-tools.
 
 ## Writing and undo
 
-- Apply only reviewed rows from a report whose file hash (md5 from `songs.jsonl`) still matches; a changed file is
-  skipped and reported.
+- Apply only accepted rows whose audio hash (the md5 `songs.jsonl` and dedupe use, of the audio stream, so a tag
+  write keeps it) and date tags are what the report saw; a changed file is skipped and reported.
 - Before writing, append the old TDRC, TDOR, `DATE_SOURCE` and `DATE_RULE` of each file to `years-backup.jsonl` in
   the data directory (fsynced), then write the tags to a temporary copy in the same directory and `os.replace` it
   over the original, so MPD never reads a half-written file.
-- `--rollback` restores the backup values the same way (newest entry per file).
+- `--rollback [ID...]` restores the backup values the same way: the newest apply per file not rolled back yet, and
+  only while the file still has the values that apply wrote. The rolled-back row goes back to `undecided`.
 - After writing, `mpc update` for the touched directories so MPD's `Date` / `OriginalDate` change.
 
 ## Rate limits and run time
@@ -153,29 +167,34 @@ go at the top. Nothing is written in a dry run.
 
 - rormpc: Queue Year column and the album browser read `originaldate`, falling back to `date` (the theme's Year column and
   `rormpc_browse.rs`).
-- hits: `library_songs` reads `originaldate`, falling back to `date`; `--years-of release` and the Year column use
+- hits (done): `library_songs` reads `originaldate`, falling back to `date`; `--years-of release` and the Year column use
   it. Chart rows not in the library keep `mb_song`'s first release.
 - Until those read TDOR, writing only TDOR changes nothing visible; so either the views change first, or TDRC is
   set to the song's year too (see the choices).
 
-## Open choices
+## Decisions (2026-10-10, by the user; the options as asked)
 
 Which year do the views show?
+Decided: TDOR (original release), TDRC kept per recording.
 Options: TDOR (original release), TDRC kept per recording (recommended) | TDRC = TDOR = the original release, as today | TDOR, and TDRC only for versions
 Checked: every view reads TDRC today; MPD exposes TDOR as `originaldate`.
 
 May high-confidence rows be applied without row-by-row review?
+Decided: no, review every row.
 Options: yes, earlier-only same-length rows with matching release-group year (recommended) | no, review every row | yes, every earlier proposal
 Checked: 12 of 15 high rows right in the sample, the other 3 off by one year; earlier-only proposals 25 of 28 right or closer.
 
 Where is the review done?
+Decided: a rormpc "Years to review" view (stage B; the CLI ids meanwhile).
 Options: the Markdown report with `--accept`/`--reject` ids (recommended) | a rormpc "Years to review" view | both, the view later
 Checked: an earlier review of undated files used the report-and-ids flow.
 
 Should a video match with no audio alternative be found through the work on download?
+Decided: yes, look the work up and swap to the same-length audio recording (stage C).
 Options: yes, look the work up and swap to the same-length audio recording (recommended) | send it to review instead | keep the video recording and fix only the year
 Checked: at least 24 of 60 earlier video matches had an audio alternative; the rest need a work lookup.
 
 What happens to files without any MusicBrainz reference (no work relationship)?
+Decided: ask for an MBID through the picker (stage B; `--mbid ROW MBID` meanwhile).
 Options: keep the current year, list only suspect classes (recommended) | clear the year when it is a video recording's | ask for an MBID through the picker
 Checked: 46 of 189 sampled recordings have no work relationship.

@@ -29,6 +29,7 @@
   musicdb doctor [--json] [-v]          # silent data errors: duplicate listens, songs in several files, paths
                                         # that no longer exist, plays credited to no file (read-only)
   musicdb lyrics --help             # lyrics from LRCLIB into lyrics_dir (rmpc's Lyrics pane)
+  musicdb years --help              # original release years from MusicBrainz: dry-run report, review, apply, rollback
   musicdb deletions [--json [--all]] [--retry]  # the deletion journal (--all adds finished permanent deletions);
                                                 # --retry runs failed remote steps (update does it)
   musicdb deletions allow|block ID      # a deleted song may be downloaded again / is blocked again (deleted.py)
@@ -1309,6 +1310,9 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "lyrics":
         from . import lyrics
         return lyrics.main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "years":
+        from . import years
+        return years.main(sys.argv[2:])
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
     sp.add_parser("import-mpdlog").set_defaults(fn=import_mpdlog)

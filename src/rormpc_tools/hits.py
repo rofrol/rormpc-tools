@@ -456,7 +456,8 @@ def library_songs():
         if not f:
             continue
         one = lambda k: (t.get(k)[0] if isinstance(t.get(k), list) else t.get(k)) or ""
-        year = int(one("date")[:4]) if one("date")[:4].isdigit() else None
+        date = one("originaldate") or one("date")  # the song's original release (TDOR), else this file's date
+        year = int(date[:4]) if date[:4].isdigit() else None
         out[f] = {"artist": one("artist") or f, "title": one("title") or pathlib.Path(f).stem, "file": f,
                   "year": year or 0, "years": [year] if year else [], "mbid": one("musicbrainz_trackid") or None,
                   "artist_mbid": one("musicbrainz_artistid") or None, "tags": [], "listens": 0, "hidden": False,
