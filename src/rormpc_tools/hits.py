@@ -39,7 +39,7 @@ Caches: ~/.cache/hits/.
 """
 import argparse, collections, datetime as dt, json, os, pathlib, re, subprocess, sys, time, urllib.parse, urllib.request
 
-from . import hits_exceptions, hits_rules, hits_sets, mbtag, musicdb, settings
+from . import external, hits_exceptions, hits_rules, hits_sets, mbtag, musicdb, settings
 
 
 CACHE = pathlib.Path(os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")) / "hits"
@@ -1033,6 +1033,7 @@ def prefetch(a):
         print(f"{fetched} songs looked up, {len(todo)} popularity checked", flush=True)
 
 
+@external.cli
 def main():
     if sys.argv[1:] == ["--version"]:
         print(f"hits {settings.version()}")

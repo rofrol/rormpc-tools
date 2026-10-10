@@ -45,7 +45,7 @@ Needs sticker_file in mpd.conf.
 """
 import argparse, collections, contextlib, datetime as dt, fcntl, json, os, pathlib, re, shutil, sqlite3, statistics, subprocess, sys, time, urllib.request, zipfile, zoneinfo
 
-from . import identity, mbtag, settings
+from . import external, identity, mbtag, settings
 
 DB = settings.DB_FILE
 DATA = settings.DATA_DIR
@@ -1249,6 +1249,7 @@ def missing(a):
         print(f"  [{src}] {artist} - {title}" + (f"  https://youtu.be/{ytid}" if ytid else ""))
 
 
+@external.cli
 def main():
     if sys.argv[1:] == ["--version"]:
         print(f"musicdb {settings.version()}")

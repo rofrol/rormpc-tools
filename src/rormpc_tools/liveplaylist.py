@@ -32,7 +32,7 @@ command: ~/.cache/rormpc-tools/liveplaylist/status.json (atomic), its log next t
 import argparse, contextlib, datetime as dt, fcntl, json, os, pathlib, random, re, shutil, signal, subprocess, sys
 import time, urllib.parse
 
-from . import identity, mbtag, settings, yt_mp3_mb
+from . import external, identity, mbtag, settings, yt_mp3_mb
 
 SCHEMA = 1
 MUSIC = settings.MUSIC_DIR
@@ -530,6 +530,7 @@ def cmd_download(a):
 
 # ------------------------------------------------------------------ main
 
+@external.cli
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="liveplaylist", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)

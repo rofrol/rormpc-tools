@@ -24,7 +24,7 @@ target dir (by YouTube id in the name) are not downloaded again, so a rerun afte
 """
 import argparse, json, pathlib, re, shutil, subprocess, sys, tempfile
 
-from . import identity, mbtag, settings
+from . import external, identity, mbtag, settings
 
 MUSIC = settings.MUSIC_DIR
 LOG = mbtag.CACHE / "log.jsonl"
@@ -218,6 +218,7 @@ def batch(urls, dir_arg=None, extra=(), known=None):
     return report
 
 
+@external.cli
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("urls", nargs="*")
