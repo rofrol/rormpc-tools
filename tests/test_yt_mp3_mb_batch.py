@@ -1,5 +1,5 @@
 """yt-mp3-mb --batch, offline: a fake yt-dlp download and fake MusicBrainz identification."""
-import json, subprocess, sys, types
+import json, pathlib, subprocess, sys, types
 
 import pytest
 
@@ -17,7 +17,7 @@ def ytmb(tmp_path, monkeypatch):
     monkeypatch.setattr(yt_mp3_mb, "LOG", tmp_path / "log.jsonl")
     monkeypatch.setattr(yt_mp3_mb, "replaygain", lambda p: None)
     monkeypatch.setattr(yt_mp3_mb, "mpd_update", lambda: None)
-    calls = types.SimpleNamespace(skip=None, statuses={})
+    calls = types.SimpleNamespace(skip=None, statuses={}, swaps={})
 
     def download(urls, extra, skip_ids=()):
         calls.skip = set(skip_ids)
@@ -31,8 +31,11 @@ def ytmb(tmp_path, monkeypatch):
 
     def resolve(d):
         st = calls.statuses.get(d["ytid"], "auto")
-        return {"status": st, "artist": "MB Artist", "title": "MB Title", "mbid": "" if st == "nomatch" else "rec",
-                "artist_mbids": [], "score": 0.8, "method": "lb", "alternatives": []}
+        row = {"status": st, "artist": "MB Artist", "title": "MB Title", "mbid": "" if st == "nomatch" else "rec",
+               "artist_mbids": [], "score": 0.8, "method": "lb", "alternatives": []}
+        if d["ytid"] in calls.swaps:
+            row["swap"] = calls.swaps[d["ytid"]]
+        return row
 
     monkeypatch.setattr(yt_mp3_mb, "download", download)
     monkeypatch.setattr(mbtag, "collect", lambda path, yid, *a: {"ytid": yid, "provided": None, "channel": "X",
@@ -56,6 +59,29 @@ def test_batch_leaves_uncertain_matches_for_review_without_mbid(ytmb, tmp_path):
     assert by[B]["mbid"] == "" and (by[B]["artist"], by[B]["title"]) == ("YT Artist", "YT Title")
     assert [n["ytid"] for n in r["needs_review"]] == [B] and r["needs_review"][0]["proposal"]["mbid"] == "rec"
     assert all(t["mbid"] == "" for t in ytmb.tags if t["artist"] == "YT Artist")
+
+
+SWAP = {"from": "video-rec", "to": "rec", "rule": "same-length", "why": "work W: audio recording, 200 s"}
+
+
+def test_swap_evidence_in_log_and_review_proposal(ytmb, tmp_path):
+    ytmb.statuses = {B: "review"}
+    ytmb.swaps = {A: SWAP, B: {**SWAP, "to": None, "rule": None, "why": "kept the match: no audio recording"}}
+    r = yt_mp3_mb.batch([f"https://www.youtube.com/watch?v={A}", f"https://www.youtube.com/watch?v={B}"], "Out")
+    log = {pathlib.Path(e["file"]).name.split("--")[2]: e for e in map(json.loads, (tmp_path / "log.jsonl").read_text().splitlines())}
+    assert log[A]["swap"] == SWAP and log[B]["swap"]["to"] is None
+    # existing fields unchanged; the swap is an added field only
+    assert {k: log[A][k] for k in ("status", "artist", "title", "mbid")} == {
+        "status": "auto", "artist": "MB Artist", "title": "MB Title", "mbid": "rec"}
+    assert r["needs_review"][0]["proposal"]["swap"]["why"].startswith("kept the match")
+    assert all("swap" not in f for f in r["files"])
+
+
+def test_no_swap_field_without_a_swap(ytmb, tmp_path):
+    ytmb.statuses = {B: "review"}
+    r = yt_mp3_mb.batch([f"https://www.youtube.com/watch?v={A}", f"https://www.youtube.com/watch?v={B}"], "Out")
+    assert all("swap" not in json.loads(line) for line in (tmp_path / "log.jsonl").read_text().splitlines())
+    assert set(r["needs_review"][0]["proposal"]) == {"artist", "title", "mbid", "score", "method", "alternatives"}
 
 
 def test_batch_resumes_without_downloading_present_files(ytmb, tmp_path):

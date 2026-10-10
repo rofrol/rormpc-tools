@@ -22,6 +22,8 @@ target dir (by YouTube id in the name) are not downloaded again, so a rerun afte
 --json prints one object on stdout, messages go to stderr:
   {"files": [{"path", "ytid", "status" auto|review|nomatch, "artist", "title", "mbid"}],
    "needs_review": [{"path", "ytid", "proposal": {"artist", "title", "mbid", "score", "method", "alternatives"}}],
+     (a proposal, like the log.jsonl entry, also has "swap": {"from", "to", "rule", "why"} when a video or DJ-mix
+     match was swapped to the song's audio recording, or kept with "to": null; see mbtag.resolve)
    "skipped": [ytid already in the target dir], "failed": [{"ytid", "error"}] (identifying or tagging failed),
    "blocked": [{"ytid", "reason", "deleted": {"id", "deleted_at", "file"}}] (deleted before; not in "files"),
    "error": null | "yt-dlp failed (1)"}  (exit status 1 with an error)
@@ -106,7 +108,7 @@ def replaygain(path):
 
 def proposal(row):
     """What --batch reports for an uncertain match instead of asking about it."""
-    return {k: row[k] for k in ("artist", "title", "mbid", "score", "method", "alternatives")}
+    return {k: row[k] for k in ("artist", "title", "mbid", "score", "method", "alternatives", "swap") if k in row}
 
 
 def process(path, info, target, yes, batch=False, blocks=None):
@@ -146,9 +148,12 @@ def process(path, info, target, yes, batch=False, blocks=None):
     dest = target / name
     if pathlib.Path(path) != dest:
         pathlib.Path(path).rename(dest)
+    log = {"file": str(dest), "status": row["status"], "artist": row["artist"], "title": row["title"],
+           "mbid": row["mbid"], "yt_title": d["yt_title"], "channel": d["channel"]}
+    if row.get("swap"):
+        log["swap"] = row["swap"]
     with LOG.open("a") as fh:
-        fh.write(json.dumps({"file": str(dest), "status": row["status"], "artist": row["artist"], "title": row["title"],
-                             "mbid": row["mbid"], "yt_title": d["yt_title"], "channel": d["channel"]}, ensure_ascii=False) + "\n")
+        fh.write(json.dumps(log, ensure_ascii=False) + "\n")
     mark = {"auto": "✓", "review": "~", "nomatch": "✗"}[row["status"]]
     print(f"{mark} {row['artist']} - {row['title']}  {row['mbid'] or '(no MBID)'}\n  -> {dest.relative_to(MUSIC) if dest.is_relative_to(MUSIC) else dest}",
           file=sys.stderr if batch else sys.stdout)
