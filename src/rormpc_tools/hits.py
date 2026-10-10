@@ -22,6 +22,9 @@
   hits hide --artist A --title T [--mbid M]   # hide a song from every Hits result (log in the data repo)
   hits except pin|exclude|remove --scope library|set:KIND --file PATH   # an exception to the rules (--help)
   hits exceptions [--json]                    # every pin and exclusion, the hides included
+  hits lists [create|update|rename|duplicate|delete|export] (--help)   # smart lists: saved rules with a name
+  hits --list "80s party"                     # run a smart list's rules (its list-scoped exceptions apply)
+  hits --rules rules.json                     # run rules from a file (a smart list's "rules" object)
   hits unhide --artist A --title T; hits hidden [--json]   # undo / review
 
 Selection = (union of + sets, or the whole library when no set is +) − (union of − sets) ∩ period ∩ genres ∩
@@ -453,10 +456,11 @@ def library_songs():
 
 
 # playlists the tools write themselves (hits --playlist under each source's label, musicdb lb-playlists, sync's
-# Skipped and Not finished, dedupe's whole-folder dumps): not a choice of songs. "Tag …" playlists (my tags) and
+# Skipped and Not finished, dedupe's whole-folder dumps, the smart lists' "Smart …" exports, which would feed a
+# list on itself): not a choice of songs. "Tag …" playlists (my tags) and
 # liveplaylist's .m3u (every song accepted by me) stay.
 GENERATED_PLAYLISTS = ("Hits ", "My charts ", "Library ", "Likes ", "Recommendations ", "My playlists ", "LB ",
-                       "Folder ", "Skipped", "Not finished")
+                       "Folder ", "Skipped", "Not finished", "Smart ")
 
 
 def my_playlists():
@@ -715,13 +719,45 @@ def make_label(a, period):
     return label + f" · {a.formula}"
 
 
+def load_rules(a):
+    """--list REF / --rules FILE: the stored rules become the filter options (refused next to filter options:
+    one source of rules). --list also opens the list, so its own exceptions apply."""
+    from . import smartlists
+    given = [opt for opt, value, default in FILTER_OPTIONS if getattr(a, value) != default]
+    if given:
+        raise ValueError(f"--list/--rules carry the rules: drop {', '.join(given)}")
+    if a.list:
+        lst = smartlists.find(a.list)
+        if lst["blocked"]:
+            raise ValueError(f"smart list {lst['name']!r}: {lst['blocked']}")
+        rules, a.open_list = lst["rules"], lst["id"]
+    else:
+        data = json.loads(pathlib.Path(a.rules_file).expanduser().read_text())
+        rules = data.get("rules", data) if isinstance(data, dict) else data
+        problem = smartlists.problem(rules)
+        if problem:
+            raise ValueError(f"{a.rules_file}: {smartlists.NEWER} ({problem})")
+    smartlists.to_options(rules, a)
+
+
+# the filter options --list/--rules replace: (option, namespace attribute, parser default)
+FILTER_OPTIONS = [("decade", "decade", None), ("--years", "years", None), ("--top", "top", None),
+                  ("--set", "set", None), ("--rank", "rank", None), ("--years-of", "years_of", None),
+                  ("--source", "source", None), ("--genre", "genre", ""), ("--artist", "artist", ""),
+                  ("--owned", "owned", False)]
+
+
 def show(a):
+    """Run the rules, print the rows (and write --json, --playlist, --download); returns the rows."""
     try:
+        if getattr(a, "list", None) or getattr(a, "rules_file", None):
+            load_rules(a)
         a.rules = hits_rules.resolve(a.source, a.set, a.rank, a.years_of, a.sort)
         a.top_ranges = hits_rules.top_for(a.rules, a.top)
-    except ValueError as err:
+    except (ValueError, LookupError, OSError) as err:
         hits_rules.fail(err)
     r = a.rules
+    r.list = getattr(a, "open_list", None)  # the open smart list: its exceptions (scope list:ID) apply
     if r.rank == "none" and a.top:
         a.n = 0  # "1-100" with no rank: every row
     lib = musicdb.library()
@@ -788,6 +824,7 @@ def show(a):
             subprocess.run([sys.executable, "-m", "rormpc_tools.yt_mp3_mb", "--yes", "-d", f"Hits/{year // 10 * 10}s", q, "--", "--no-playlist"])
         if missing and a.playlist:
             print("re-run with --playlist after the MPD update to include the new files")
+    return rows
 
 
 HIDDEN = settings.DATA_DIR / "hits-hidden.jsonl"
@@ -874,7 +911,7 @@ def write_json(a, label, rows, plays):
     """Versioned result file for rormpc's Hits pane, written atomically (the pane may read it any time). Version
     1 gained fields only: "rules", "formula", "summary", "counts", args.sets/years_of, rows' "ranked" and "sets";
     then (exceptions) counts.pinned/excluded, args.show_excluded, rows' "pinned", "excluded", "exceptions",
-    "song_id" and "chart_key"
+    "song_id" and "chart_key"; then (smart lists) args.open_list and args.open_list_name
     (rormpc's hits.rs parses a copy of this shape in its tests; tests/test_rormpc_contract.py checks this side)."""
     r = a.rules
     owned = sum(1 for s in rows if s["file"])
@@ -885,7 +922,7 @@ def write_json(a, label, rows, plays):
                     "owned": a.owned, "rank": r.rank, "years_of": r.years_of,
                     "sets": [("+" if v > 0 else "-") + k for k, v in r.sets.items()],
                     "show_hidden": a.show_excluded, "show_excluded": a.show_excluded, "source": r.source,
-                    "sort": a.sort},
+                    "sort": a.sort, "open_list": r.list, "open_list_name": open_list_name(r.list)},
            "rules": hits_rules.as_dict(r) | {"period": a.years or a.decade, "top": a.top if a.top_ranges else None,
                                               "genre": a.genre, "artist": a.artist, "owned": a.owned},
            "formula": a.formula, "summary": a.summary,
@@ -909,6 +946,15 @@ def write_json(a, label, rows, plays):
     tmp.write_text(json.dumps(out, ensure_ascii=False, indent=1))
     tmp.replace(path)
     print(f"json: {path}")
+
+
+def open_list_name(list_id):
+    """The open smart list's name (None when none is open or it is gone)."""
+    if not list_id:
+        return None
+    from . import smartlists
+    lst = smartlists.fold().get(list_id)
+    return lst["name"] if lst else None
 
 
 def playlists_note(a):
@@ -981,6 +1027,9 @@ def main():
         return hits_exceptions.except_cmd(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "exceptions":
         return hits_exceptions.list_cmd(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "lists":
+        from . import smartlists
+        return smartlists.main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "prefetch":
         ap = argparse.ArgumentParser(prog="hits prefetch")
         ap.add_argument("cmd"); ap.add_argument("years", nargs="?", default=f"{FIRST_YEAR}-{dt.date.today().year - 1}")
@@ -991,12 +1040,21 @@ def main():
         return export_seed()
     if len(sys.argv) > 1 and sys.argv[1] == "compact":
         return compact_cache()
-    # "--set -likes": argparse would read "-likes" as an option, so it becomes "--set=-likes"
-    argv, rest = [], iter(sys.argv[1:])
+    show(parser().parse_args(set_argv(sys.argv[1:])))
+
+
+def set_argv(argv):
+    """"--set -likes": argparse would read "-likes" as an option, so it becomes "--set=-likes"."""
+    out, rest = [], iter(argv)
     for x in rest:
         nxt = next(rest, None) if x == "--set" else None
-        argv += [f"--set={nxt}"] if nxt is not None else [x]
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+        out += [f"--set={nxt}"] if nxt is not None else [x]
+    return out
+
+
+def parser(prog=None):
+    """hits' options (the result, its rules and its outputs); `hits lists create|update` reads the same."""
+    ap = argparse.ArgumentParser(prog=prog, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("decade", nargs="?", help='e.g. 1980s, 80s, 2010s, or "all" for top N of every decade')
     ap.add_argument("--years", help="year ranges instead of a decade, e.g. 1985-1992 or 1970-1979,1990-1999 (one pooled ranking)")
     ap.add_argument("--top", help='percent ranges of the ranking, e.g. "1-10" or "11-20,21-50" (instead of -n)')
@@ -1031,7 +1089,12 @@ def main():
     ap.add_argument("--owned", action="store_true", help="top N among the songs you have, not the overall top N")
     ap.add_argument("--playlist", action="store_true", help="write an MPD playlist of the songs you have")
     ap.add_argument("--download", action="store_true", help="download missing songs with yt-mp3-mb")
-    show(ap.parse_args(argv))
+    ap.add_argument("--list", metavar="ID|NAME", help="run a smart list's rules (hits lists); its exceptions apply")
+    ap.add_argument("--rules", dest="rules_file", metavar="FILE",
+                    help="run rules from a JSON file: a smart list's rules object (or an object with \"rules\")")
+    ap.add_argument("--open-list", metavar="ID",
+                    help="the smart list open in rormpc's Play: exceptions scoped to it (list:ID) apply")
+    return ap
 
 
 if __name__ == "__main__":

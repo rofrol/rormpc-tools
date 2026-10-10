@@ -50,7 +50,8 @@ def test_hits_json_carries_the_rules_formula_and_counts(env, monkeypatch, tmp_pa
     assert data["args"] | {"period": None} == {"period": None, "top": "1-100", "genre": "", "artist": "",
                                                "owned": False, "rank": "plays", "years_of": "release",
                                                "sets": ["-likes"], "show_hidden": False,
-                                               "show_excluded": False, "source": None, "sort": "plays"}
+                                               "show_excluded": False, "source": None, "sort": "plays",
+                                               "open_list": None, "open_list_name": None}
     assert data["rules"] == {"schema": 1, "sets": {"likes": -1}, "rank": "plays", "years_of": "release",
                              "period": "1980-1989", "top": "1-100", "genre": "", "artist": "", "owned": False}
     assert data["formula"] == "Library − Likes ∩ 1980-1989 ∩ Top 1-100%"

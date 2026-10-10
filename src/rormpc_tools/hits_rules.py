@@ -106,7 +106,8 @@ def legacy_source(rules):
 
 
 def as_dict(rules):
-    """The rules as JSON: sets as {key: ±1}, so a smart list can store them later (phase 4)."""
+    """The rules as JSON: sets as {key: ±1}; a smart list stores them with its period, Top %, genres, artists
+    and owned (smartlists.rules_of)."""
     return {"schema": RULES_SCHEMA, "sets": dict(rules.sets), "rank": rules.rank, "years_of": rules.years_of}
 
 
@@ -242,8 +243,11 @@ def select(cands, members, rules, *, wanted=(), top=None, owned=False, show_hidd
 # ---------------------------------------------------------------- exceptions
 
 def exception_applies(e, rules):
-    """library always; set:KIND while KIND is a + set (hits_exceptions.applies)."""
+    """library always; set:KIND while KIND is a + set; list:ID while that smart list is open (`rules.list`, set by
+    --list / --open-list) (hits_exceptions.applies)."""
     kind, _, key = e["scope"].partition(":")
+    if kind == "list":
+        return bool(key) and getattr(rules, "list", None) == key
     return e["scope"] == "library" or (kind == "set" and rules.sets.get(key, 0) > 0)
 
 

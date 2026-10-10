@@ -3,6 +3,7 @@
   hits except pin --scope library --file PATH          # in every result, whatever the filters say
   hits except exclude --scope set:billboard --id ID    # out of every result while Billboard is a + set
   hits except exclude --chart-key 'toto|africa'        # a chart song you do not have (as `hits hide`)
+  hits except pin --scope "list:80s party" --file PATH # only while that smart list is open (name or id)
   hits except remove --scope library --id ID           # drop that exception again
   hits exceptions [--json]                             # every exception, `hits hide` included
 
@@ -10,7 +11,8 @@
   no rank, sits after the ranked rows and is not part of the ranking or the Top % cut.
 - Exclusion ⊘: the song is out. Any applicable exclusion beats any pin; a pin beats `-` sets, genres and artists.
 - Scope: `library` (every result) or one set (`set:billboard`, `set:likes`, ...): a set-scoped exception applies
-  only while that set is + in the selection. (`list:<id>` for smart lists comes with them.)
+  only while that set is + in the selection; `list:<id>` (a smart list, `hits lists`) only while that list is
+  open (`hits --list`, or rormpc's Play passing `--open-list`). Deleting a smart list removes its exceptions.
 
 Identity: a library song by music-data's song `id` (songs.jsonl; a merged id leads to the song it was merged
 into), a chart song without a file by its chart key (`main artist|title`, as `hits hide`). The log is
@@ -30,7 +32,8 @@ def log_path():
 
 
 def parse_scope(text):
-    """'library' | 'set:billboard' (aliases as --set reads them) -> the canonical scope; anything else refused."""
+    """'library' | 'set:billboard' (aliases as --set reads them) | 'list:ID' (a smart list by id or name) -> the
+    canonical scope; anything else refused."""
     text = (text or "library").strip()
     if text == "library":
         return text
@@ -39,8 +42,12 @@ def parse_scope(text):
         key, _ = hits_rules.parse_set(name)
         return f"set:{key}"
     if kind == "list" and colon:
-        raise ValueError("scope list:ID: smart lists are not there yet (scope library or set:KIND)")
-    raise ValueError(f"unknown scope {text!r}; use library or set:{'|'.join(hits_rules.SET_KINDS)}")
+        from . import smartlists
+        try:
+            return f"list:{smartlists.find(name)['id']}"
+        except LookupError as err:
+            raise ValueError(f"scope {text}: {err}") from None
+    raise ValueError(f"unknown scope {text!r}; use library, set:{'|'.join(hits_rules.SET_KINDS)} or list:ID")
 
 
 applies = hits_rules.exception_applies
@@ -155,7 +162,8 @@ def except_cmd(argv):
     ap = argparse.ArgumentParser(prog="hits except", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("action", choices=["pin", "exclude", "remove"])
-    ap.add_argument("--scope", default="library", help="library (every result) or set:KIND (only while KIND is +)")
+    ap.add_argument("--scope", default="library", help="library (every result), set:KIND (only while KIND is +) "
+                    "or list:ID (only while that smart list is open; its name works too)")
     who = ap.add_mutually_exclusive_group(required=True)
     who.add_argument("--id", help="music-data song id (songs.jsonl)")
     who.add_argument("--file", help="library file (MPD path)")
@@ -198,14 +206,18 @@ def remove(scope, song, chart_key):
 
 def listing():
     """Every exception in force as rows for rormpc's Exceptions list: the current file (None and `gone` for a
-    pinned song whose file went away: it is skipped, never dropped from the log)."""
+    pinned song whose file went away: it is skipped, never dropped from the log); `scope_name` names a smart
+    list's scope."""
+    from . import smartlists
+    names = {f"list:{i}": lst["name"] for i, lst in smartlists.fold().items()}
     rows = []
     for e in active():
         song = survivor(e["song"]) if e.get("song") else None
         file = live_path(song) if song else None
         rows.append({"id": e["id"], "action": e["action"], "scope": e["scope"], "song": song,
                      "chart_key": e.get("chart_key"), "artist": e.get("artist"), "title": e.get("title"),
-                     "file": file, "gone": bool(song) and file is None, "via": e.get("via"), "ts": e.get("ts")})
+                     "file": file, "gone": bool(song) and file is None, "via": e.get("via"), "ts": e.get("ts"),
+                     "scope_name": names.get(e["scope"])})
     return sorted(rows, key=lambda r: (r["scope"] != "library", r["scope"], r["action"],
                                        (r["artist"] or "").lower(), (r["title"] or "").lower()))
 

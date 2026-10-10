@@ -148,7 +148,7 @@ def export(_a):
             json.dumps({k: v for k, v in zip(cols, r) if v not in ("", None)}, ensure_ascii=False) + "\n" for r in rows))
     git = lambda *a: subprocess.run(["git", "-C", str(DATA), *a], capture_output=True, text=True)
     # the hand-written logs (tag lists, manual genres, hidden hits) are committed with the hourly export
-    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl", "likes.jsonl", "aliases.jsonl", "versions.jsonl", "songs.jsonl")
+    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl", "likes.jsonl", "aliases.jsonl", "versions.jsonl", "songs.jsonl", "exceptions.jsonl", "smartlists.jsonl")
             if (DATA / f).exists()]
     git("add", "events.jsonl", "favorites.jsonl", "tombstones.jsonl", "skips.jsonl", "deletions", *logs)
     if git("diff", "--cached", "--quiet").returncode:
@@ -794,6 +794,7 @@ def update(a):
     network(youtube_index_daily)
     network(hits_background)
     network(versions_fingerprints)
+    network(smart_lists)
     export(a)
     from . import doctor
     print(doctor.write_summary())
@@ -806,6 +807,14 @@ def hits_background():
     MusicBrainz lookups in 60 s, and some stale ListenBrainz popularity. A new install already has the seed."""
     from . import hits
     hits.prefetch(argparse.Namespace(years=f"{hits.FIRST_YEAR}-{dt.date.today().year - 1}", budget=30, max_seconds=60))
+
+
+def smart_lists():
+    """Each smart list as the MPD playlist "Smart NAME" (hits lists export): phones play a fresh snapshot."""
+    from . import smartlists
+    errors = smartlists.export()
+    if errors:
+        raise RuntimeError("; ".join(errors))
 
 
 def versions_fingerprints():

@@ -124,7 +124,7 @@ def test_except_writes_events_and_the_later_line_wins(reg, monkeypatch, capsys):
     (["pin", "--file", "not-synced.mp3"], "not in songs.jsonl"),
     (["exclude", "--id", "id-zzz"], "unknown song id"),
     (["exclude", "--scope", "set:charts2", "--id", "id-a"], "unknown set"),
-    (["exclude", "--scope", "list:1", "--id", "id-a"], "smart lists"),
+    (["exclude", "--scope", "list:1", "--id", "id-a"], "no smart list"),
 ])
 def test_except_refuses(reg, monkeypatch, argv, error):
     with pytest.raises(SystemExit, match=error):
