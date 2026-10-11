@@ -63,7 +63,8 @@ Transport commands reach mpd-player as datagrams on a Unix socket, for media key
 - Commands: `next`, `prev` (with the weighted shuffle the same as `shuffle prev`: back through the songs that really
   played, no skip counted), `toggle`, `play`, `pause`, `stop` (the last three idempotent), `seek` (absolute
   seconds). Each reads MPD's state first. Next and Previous from a pause play the song they move to, also inside the
-  gap's silence or "Pause for…", whose timers are then cancelled; `pause` inside the gap's silence stays paused.
+  gap's silence or "Pause for…", whose timers are then cancelled; `pause` inside the gap's silence or "Pause for…" ends the silence or cancels the
+  timer (as `pause cancel`) and stays paused: nothing plays on later.
 - Nothing is answered: `mpd-player send next` (or `send seek 30`) exits 1 with "mpd-player is not running" when no
   daemon listens, else 0; the daemon logs each command with the time from receipt to MPD's answer. When mpd-player
   is down, a media key does nothing (launchd/systemd restarts it).

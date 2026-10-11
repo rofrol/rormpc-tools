@@ -29,8 +29,8 @@ Checked on a scratch MPD 0.24.15 (port 6650) with a private dbus-daemon: every M
 queue (1-5 ms to MPD), SetPosition for another track ignored, PropertiesChanged and Seeked as above, the name
 taken by another client and returned, the bus killed (logged, one reconnect, the socket still works).
 `mpd-player nowplaying` started against a stopped scratch MPD (no claim, no MediaPlayer call) and exited 1 when MPD
-went away. Open: what `pause` (from a key, Now Playing or MPRIS) does while "Pause for…" holds the pause: today
-nothing, the timer plays on at its deadline (rormpc's TODO). Checked on a scratch MPD 0.24.15: `next`, `previous` and `playid` from a paused player play; `seekcur`
+went away. Decided by the user 2026-10-11 and built: `pause` (from a key, Now Playing or MPRIS) while "Pause for…"
+holds the pause cancels the timer as `pause cancel` does and MPD stays paused; the timer never plays on. Checked on a scratch MPD 0.24.15: `next`, `previous` and `playid` from a paused player play; `seekcur`
 leaves it paused; `next` at the last song stops; `next` while stopped answers "Not playing". The decisions on the
 open choices are in rormpc's TODO ("Media keys through mpd-player").
 
@@ -141,6 +141,9 @@ Transport commands (new, owned by the daemon itself rather than a module). Each 
   cancels the timer (the pause module already does). A pause from the toggle during a song keeps the gap armed as
   today.
 - `play`, `pause`, `stop`: idempotent, for Now Playing / MPRIS, which have separate commands; they never toggle.
+  `pause` inside the gap's silence ends the silence and stays paused; `pause` during "Pause for…" cancels the timer
+  (the pause module's `pause cancel`: no deadline, `last` "cancelled" in pause.json) and stays paused, so the timer
+  never plays on (decided by the user 2026-10-11).
 - `seek` with `position` (seconds): absolute position, for Now Playing's scrubber and MPRIS `SetPosition`/`Seek`.
 
 Whether MPD `next` (and `playid`) leave a paused player paused is checked on a scratch MPD before the code relies

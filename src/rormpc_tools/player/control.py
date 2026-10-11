@@ -18,7 +18,8 @@ with transport commands, one datagram each, without starting a process, mpc or a
   and the status refresh, and reads a fresh MPD status first. Next and Previous from a pause (the user's, the gap's
   silence or "Pause for…") end up playing; the timers see the change and cancel themselves. Previous is
   `shuffle prev` (the trail, with its key-repeat debounce) when the shuffle module runs. play, pause and stop are
-  idempotent; pause also ends the gap's silence, so the gap does not play on by itself.
+  idempotent; pause also ends the gap's silence or cancels "Pause for…" (as `pause cancel`), so neither plays on by
+  itself.
 - Fire and forget: nothing is answered (Karabiner's sender is unbound). Each command is logged with its source
   (`socket`; `nowplaying` when the payload says `"from": "nowplaying"`; `mpris` for the D-Bus methods, which queue
   through `submit`) and the time from receipt to MPD's answer.
@@ -269,6 +270,13 @@ async def _pause(d, cmd):
     if gap is not None and gap.gap_until:
         gap.gap_until = None  # paused on purpose: the silence must not play on
         return "ended the gap's silence, paused"
+    timer = d.modules.get("pause")
+    if timer is not None and timer.holds_pause():
+        await timer.on_message(d, "cancel", "")  # as `pause cancel`: the timer never plays on (decided 2026-10-11)
+        if s.get("state") == "play":  # played meanwhile, before the timer saw it
+            await d.mpd.pause(1)
+            return "cancelled the Pause for… timer, paused"
+        return "cancelled the Pause for… timer, stays paused"
     if s.get("state") == "play":
         await d.mpd.pause(1)
         return "paused"

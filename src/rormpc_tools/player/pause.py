@@ -3,7 +3,8 @@
 The deadline is kept in pause.json, so a Mac that slept past it resumes on wake, rormpc may be closed, and a restart
 of this daemon keeps the timer (a deadline that passed while it was down resumes at start, if still paused). The
 timer holds only the pause it made: anyone pressing play or stop, another song, or a replaced queue (a stop or new
-song ids) cancels it, and nothing is resumed later. While it holds the pause, the gap module neither starts nor ends
+song ids) cancels it, and nothing is resumed later; the transport `pause` (media key, Now Playing, MPRIS) cancels it
+as `pause cancel` does and MPD stays paused. While it holds the pause, the gap module neither starts nor ends
 a silence, so the gap never presses play inside a timed pause; after the resume the gap arms again as usual.
 
 Commands: `pause start SECONDS` (while playing: pause now; while paused: play on after SECONDS; again while the timer

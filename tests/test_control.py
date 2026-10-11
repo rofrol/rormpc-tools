@@ -433,6 +433,43 @@ def test_a_key_inside_pause_for_a_while_plays_and_cancels_the_timer(key, song):
     assert not p.active() and player.read_state("pause")["last"] == "overridden"
 
 
+@pytest.mark.parametrize("send", [
+    lambda d: control.enqueue(d, b"pause", "socket"),
+    lambda d: control.enqueue(d, b'{"command": "pause", "from": "nowplaying"}', "socket"),
+    lambda d: control.submit(d, {"command": "pause"}, "mpris"),
+])
+def test_pause_inside_pause_for_a_while_cancels_the_timer_and_stays_paused(send, monkeypatch, capsys):
+    mpd = MPD()
+    d, p = paused_for_a_while(mpd)
+    due, generation = p.deadline(), player.read_state("pause")["generation"]
+    send(d)
+    run(d.step(set()))
+    assert not p.active() and mpd.st["state"] == "pause"
+    saved = player.read_state("pause")
+    assert saved["deadline"] is None and saved["last"] == "cancelled" and saved["generation"] == generation + 1
+    assert "cancelled the Pause for… timer, stays paused" in capsys.readouterr().err
+    monkeypatch.setattr(time, "time", lambda: due + 1)  # a fake clock past the timer's old deadline
+    run(d.step({"player"}))
+    assert ("play",) not in mpd.calls and ("pause", 0) not in mpd.calls and mpd.st["state"] == "pause"
+
+
+@pytest.mark.parametrize("state, want", [("play", [("pause", 1)]), ("pause", []), ("stop", [])])
+def test_pause_without_a_timer_leaves_the_pause_module_alone(state, want):
+    mpd = MPD(state=state)
+    p = pause.Pause()
+    press(daemon(mpd, p), "pause")
+    assert actions(mpd) == want and not p.active() and player.read_state("pause")["generation"] == 0
+
+
+def test_pause_after_a_play_the_timer_has_not_seen_yet_cancels_it_and_pauses():
+    mpd = MPD()
+    d, p = paused_for_a_while(mpd)
+    mpd.st["state"] = "play"  # played by someone else; the status refresh has not run yet
+    press(d, "pause")
+    assert not p.active() and mpd.st["state"] == "pause" and actions(mpd)[-1] == ("pause", 1)
+    assert player.read_state("pause")["last"] == "cancelled"
+
+
 def test_prev_without_the_shuffle_is_mpds_previous_and_plays_from_a_pause():
     mpd = MPD(state="pause", songid="3")
     press(daemon(mpd), "prev")
