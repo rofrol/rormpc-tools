@@ -19,6 +19,9 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
       - Keep `--json`'s shape compatible: rormpc's Years to review panel reads it (the contract test).
       Plan: docs/release-years-plan.md. When it is released, tell todo-rormpc "landed <tag>": its MBID picker and
       filter wait on it.
+      Built 2026-10-12: f15e775 (apply writes the UFID, rollback restores it, `identity.rekey` moves the `mb:`
+      keys), version 0.2.54 in 2a10a4f. Left: tag v0.2.54, push, "landed v0.2.54" to todo-rormpc (see Needs a
+      decision).
 - [ ] Media keys: `pause` (key, Now Playing, MPRIS) while "Pause for…" holds the pause cancels the timer and stays [t-jeibd5n3]
       paused. Decided by the user 2026-10-11 (d-h2in7kd6). Code: player/control.py `_pause`.
 - [ ] Transcribed lyrics (moved from rormpc's TODO t-dmpfe6gj). Plan: docs/transcribe-lyrics-plan.md, cd7fe61. [t-jsjs5ngd]
@@ -51,3 +54,9 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
 ## Proposed
 
 ## Needs a decision
+
+- May the coordinator tag v0.2.54 and push main with the tag (release of t-bd3334hn)?
+  Options: yes, tag and push now | you tag and push yourself | wait for more items before releasing
+  Checked 2026-10-12: `git tag v0.2.54` with the push was refused by Claude Code's auto-mode classifier ("Create
+  Public Surface"); main has the tests passing (594) at 2a10a4f, 5 commits ahead of origin/main, no workflow runs
+  on tags beyond the tests (.github/workflows/test.yml runs pytest on main and v* pushes).
