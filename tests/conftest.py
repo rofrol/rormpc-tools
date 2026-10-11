@@ -54,6 +54,14 @@ class FakeMPD:
     def sticker_delete(self, _type, f, k):
         self.stickers[f].pop(k)
 
+    def sticker_find(self, _type, _uri, name):
+        return [{"file": f, "sticker": f"{name}={st[name]}"} for f, st in self.stickers.items() if name in st]
+
+    def stats(self):
+        return {"db_update": str(self.db_update)}
+
+    db_update = 1  # bump it when a test changes the library under a cached index
+
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
@@ -87,3 +95,11 @@ def fresh_split_cache(tmp_path, monkeypatch):
     computed (with other monkeypatched plays under the same key) is never reused."""
     from rormpc_tools import hits
     monkeypatch.setattr(hits, "split_cache", lambda: tmp_path / "split-cache" / "my-plays-split.json")
+
+
+@pytest.fixture(autouse=True)
+def no_library_index(monkeypatch):
+    """hits' library index is cached across runs: tests read the library and plays they monkeypatch on every run
+    (test_hits_index.py turns the index on)."""
+    from rormpc_tools import hits
+    monkeypatch.setattr(hits, "index_cache", lambda: None)

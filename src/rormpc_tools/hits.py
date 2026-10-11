@@ -445,11 +445,16 @@ def coverage(decade):
 parse_top, in_top = hits_rules.parse_top, hits_rules.in_top
 
 
+def liked_files(c):
+    """The files rmpc's like sticker marks liked (like=2)."""
+    return {x["file"] for x in c.sticker_find("song", "", "like") if x.get("sticker", "").endswith("=2")}
+
+
 def library_songs():
     """Every library song's tags from MPD in one call: {file: song dict as the sources below use it}."""
     from mpd import MPDClient
     c = MPDClient(); c.connect(os.environ.get("MPD_HOST", "localhost"), int(os.environ.get("MPD_PORT", 6600)))
-    liked = {x["file"] for x in c.sticker_find("song", "", "like") if x.get("sticker", "").endswith("=2")}
+    liked = liked_files(c)
     out = {}
     for t in c.listallinfo():
         f = t.get("file")
@@ -704,6 +709,69 @@ def shuffle_split(a, lib):
     return a.own_plays, a.shuffle_picks
 
 
+INDEX_VERSION = 1  # bump when what the library index holds changes: an index of the old format is rebuilt
+
+
+def index_cache():
+    return CACHE / "library-index.json"
+
+
+def index_key(db_update):
+    """What the library index is read from: MPD's database (its `db_update`, and which MPD), the play DB (and its
+    WAL), the path logs counted() maps plays through (aliases, identity registry, version decisions), the deletion
+    journal and the banned songs. A change to any of them gives another key. Likes, exceptions and hidden songs are
+    not in the index: every run reads them itself."""
+    paths = [musicdb.DB, pathlib.Path(f"{musicdb.DB}-wal"), musicdb.DATA / "aliases.jsonl",
+             musicdb.DATA / "songs.jsonl", musicdb.DATA / "versions.jsonl", musicdb.PENDING, musicdb.DONE,
+             banned.log_path()]
+    stats = []
+    for p in paths:
+        try:
+            st = p.stat()
+            stats.append([str(p), st.st_mtime_ns, st.st_size])
+        except FileNotFoundError:
+            stats.append([str(p), None, None])
+    mpd = [os.environ.get("MPD_HOST", "localhost"), os.environ.get("MPD_PORT", "6600"), db_update]
+    return hashlib.sha256(json.dumps([INDEX_VERSION, mpd, stats]).encode()).hexdigest()
+
+
+def library_index():
+    """The library as a run reads it: (musicdb's lib, {file: song} as library_songs gives it, plays, last play).
+    Kept across runs in the cache under `index_key`: a run with the same library and play history reads it
+    instead of asking MPD for every song and matching every play again. A missing, corrupt or old index is
+    rebuilt; likes are read from MPD on every run."""
+    path = index_cache()
+    if path is None:  # no index (tests): read everything
+        lib = musicdb.library()
+        plays, last, *_ = musicdb.counted(musicdb.db(), lib)
+        return lib, library_songs(), plays, last
+    c = musicdb.mpd()
+    # the key before the reads: a library or history that changes during them is read again by the next run
+    key = index_key(c.stats().get("db_update"))
+    try:
+        saved = json.loads(path.read_text())
+        if saved.get("key") == key:
+            by_yt, by_mbid, by_name = saved["lib"]
+            lib = (by_yt, by_mbid, {k: set(fs) for k, fs in by_name.items()})
+            songs, plays, last = saved["songs"], collections.Counter(saved["plays"]), saved["last"]
+            liked = liked_files(c)
+            for f, s in songs.items():
+                s["liked"] = f in liked
+            return lib, songs, plays, last
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    lib = musicdb.library()
+    plays, last, *_ = musicdb.counted(musicdb.db(), lib)
+    songs = library_songs()
+    # atomic, and a name of its own: two runs at once never read a half-written index or share a temp file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=path.name, suffix=".tmp", delete=False) as fh:
+        json.dump({"key": key, "lib": [lib[0], lib[1], {k: sorted(fs) for k, fs in lib[2].items()}],
+                   "songs": songs, "plays": plays, "last": last}, fh)
+    os.replace(fh.name, path)
+    return lib, songs, plays, last
+
+
 def my_plays(cands, a, lib, plays):
     """Each library candidate's plays without the shuffle's own picks: candidate["mine"] (the rank's count; the
     Plays column keeps every play) and candidate["listened"] = Counter({listening year: my plays})."""
@@ -844,8 +912,9 @@ def _show(a):
     r.list = getattr(a, "open_list", None)  # the open smart list: its exceptions (scope list:ID) apply
     if r.rank == "none" and a.top:
         a.n = 0  # "1-100" with no rank: every row
-    lib = musicdb.library()
-    plays, last, *_ = musicdb.counted(musicdb.db(), lib)
+    lib, songs, plays, last = library_index()
+    if getattr(a, "songs", None) is None:
+        a.songs = songs
     if a.years:
         groups = [(a.years, sorted({y for part in a.years.split(",") if part.strip()
                                     for y in period_years(part, r)}))]

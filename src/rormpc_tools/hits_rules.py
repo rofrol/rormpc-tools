@@ -185,9 +185,9 @@ def population(cands, rules, wanted):
     if rules.rank == "billboard":
         pop = [k for k, c in cands.items() if c.get("chart_years") and in_period(c, rules.years_of, wanted)]
         if rules.order == "listens":
-            key = lambda k: (-cands[k].get("listens", 0), cands[k].get("best", 101), cands[k]["title"])
+            key = lambda k: (-cands[k].get("listens", 0), cands[k].get("best", 101), cands[k]["title"], k)
         else:
-            key = lambda k: (-cands[k]["peak"], -cands[k]["points"], -cands[k].get("listens", 0), cands[k]["title"])
+            key = lambda k: (-cands[k]["peak"], -cands[k]["points"], -cands[k].get("listens", 0), cands[k]["title"], k)
         return sorted(pop, key=key)
     pop = []
     for k, c in cands.items():
@@ -197,7 +197,8 @@ def population(cands, rules, wanted):
         if rules.years_of == "listened" and rules.rank == "plays" and not c["score"]:
             continue
         pop.append(k)
-    return sorted(pop, key=lambda k: (-cands[k]["score"], cands[k]["artist"], cands[k]["title"]))
+    # the key (a file's path) last: songs that tie keep one order in every run, whatever order MPD listed them in
+    return sorted(pop, key=lambda k: (-cands[k]["score"], cands[k]["artist"], cands[k]["title"], k))
 
 
 # ---------------------------------------------------------------- selection
@@ -220,7 +221,7 @@ def select(cands, members, rules, *, wanted=(), top=None, owned=False, show_hidd
     pop = population(cands, rules, wanted)
     ranks = {k: i for i, k in enumerate(pop, 1)}
     base = base_keys(cands, members, rules.sets)
-    pool = [cands[k] for k in base if in_period(cands[k], rules.years_of, wanted)]
+    pool = [cands[k] for k in sorted(base) if in_period(cands[k], rules.years_of, wanted)]
     for c in pool:
         c["sets"] = sorted(s for s in members if c["key"] in members[s])
     rows = []
@@ -237,7 +238,7 @@ def select(cands, members, rules, *, wanted=(), top=None, owned=False, show_hidd
             continue
         rows.append(c)
     ranked = sorted((c for c in rows if c["key"] in ranks), key=lambda c: ranks[c["key"]])
-    unranked = sorted((c for c in rows if c["key"] not in ranks), key=lambda c: c["order"])
+    unranked = sorted((c for c in rows if c["key"] not in ranks), key=lambda c: (c["order"], c["key"]))
     for c in ranked:
         c.update(rank=ranks[c["key"]], pct=round(100 * ranks[c["key"]] / len(pop), 1), cohort=len(pop), ranked=True)
     # unranked rows still get a unique number (the pane keeps its selection by it, `hits fetch --rank` picks by it)
@@ -294,7 +295,7 @@ def apply_exceptions(rows, cands, rules, by_key, *, show_excluded=False, pins=Tr
         mark(c, rules, es)
         if c["pinned"] and not c["excluded"]:
             extra.append(c)
-    extra.sort(key=lambda c: c["order"])
+    extra.sort(key=lambda c: (c["order"], c["key"]))
     last = max((c.get("rank", 0) for c in out), default=0)
     for j, c in enumerate(extra, 1):
         c.update(rank=last + j, pct=0, cohort=0, ranked=False)  # a unique row number, shown as "—"
