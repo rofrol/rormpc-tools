@@ -30,10 +30,22 @@ next round holds the source's songs not already planned for this one. When nothi
 the rest is relaxed for the least recently played resting song (`relaxed: true`, "rest relaxed"): the plan is never
 empty while the source has a song to play. A plan shorter than PLAN_N says why in `ahead_note` ("4 ahead · 12
 resting").
-The round's key is source.json's `rules_hash` (rormpc's Play: the same rules keep the round, other rules start a
-new one), else its name; the song playing across the switch is outside the source's files and never in the round.
-Songs appended by hand to a Hits source (source.json `added`, rormpc's Browse `a`) join its files and the round; one
-appended after the round was done opens it again.
+The round belongs to the source (decided 2026-10-11 for instant filtering): its key is source.json's `source_id`,
+which rormpc keeps while filter changes, smart list picks and undo change the members; songs that newly match join
+the round unheard, songs that leave stay heard (removing and re-adding a song does not replay it at once). An older
+source.json without `source_id` keys the round by its `rules_hash` (the same rules keep the round, other rules start
+a new one), else its name. `generation` (rormpc's filter change counter) is read by nobody here. The song playing
+across the switch is outside the source's files and never in the round. Songs appended by hand to a Hits source
+(source.json `added`, rormpc's Browse `a`) join its files and the round; one appended after the round was done opens
+it again.
+A song counts as heard in the round only after a scrobble-qualifying play (decided 2026-10-11, "as in scrobble"):
+half of it or LISTEN_MAX_S, whichever is shorter (ro-listenbrainz-mpd's defaults; an unknown length needs
+LISTEN_MAX_S), counted as the time it actually played (pauses do not count, a seek does not restart the count). It is
+checked on every wake (MPD's idle events, the MAX_WAIT heartbeat) and when the song stops being current, so a song
+skipped before that stays unheard and can still come in this round; the round does not end while its last unheard
+song is playing.
+Banned songs (banned.py, `musicdb ban`) are never planned, even when they are in the queue, and are not members of a
+round.
 Previous (`shuffle prev [CMD_ID]`, the media key through this daemon) walks back through the songs that really
 played (the trail, by queue id) and this mode never sends MPD `previous`. Each press goes one song further back from
 the cursor; a trail entry no longer in the queue is passed over; at the start of the trail nothing happens; the song
@@ -54,6 +66,7 @@ to, to_id}, then {cmd, result: confirmed|failed}), read by `musicdb import-skips
 """
 import datetime as dt, json, math, os, random, time, uuid
 
+from .. import banned
 from . import MAX_WAIT, Module, log, queue_entry, read_state, state_dir, write_state
 
 LANES = ["familiar"] * 7 + ["rediscovery"] * 2 + ["new"]
@@ -68,6 +81,9 @@ COOLDOWN_DAYS = [1, 3, 7, 14]
 # asking "heard enough" again within this many days after the last cooldown ended grows it
 COOLDOWN_MEMORY_DAYS = 30
 FINISHED_SHARE = 0.8
+# a play counts as heard in a round as it would count as a listen: ro-listenbrainz-mpd's defaults
+# (submission.listen_fraction, submission.listen_max_seconds; its config.rs), the shorter of the two
+LISTEN_FRACTION, LISTEN_MAX_S = 0.5, 240
 PLAN_N = 10
 HISTORY_N = 20
 # the plan's MPD priorities: plan[k] gets PLAN_N - k (10..1), below the Up next requests (255, 254, ...), so MPD
@@ -90,6 +106,11 @@ def log_prev(record):
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def listen_needed(duration):
+    """Seconds a song of `duration` has to play to count as heard (a scrobble-qualifying play)."""
+    return min(LISTEN_FRACTION * duration, LISTEN_MAX_S) if duration else LISTEN_MAX_S
 
 
 def today():
@@ -133,6 +154,7 @@ class Shuffle(Module):
         self.reason = ""
         self.rng = rng or random.Random()
         self._weights = (None, {"files": {}, "global_cadence": 14, "generated": 0})
+        self._banned = (None, set())
 
     def update_version(self):
         signature = (self._plan_source, [(e["id"], e["file"], e.get("slot")) for e in self.plan])
@@ -208,11 +230,24 @@ class Shuffle(Module):
         return bool(self.info(file).get("heard")) or bool(self.live_times(file, "finished"))
 
     def source_scope(self):
-        """(kind, key) of rormpc's source: rormpc's Play writes the canonical hash of the rules it applied
-        (`rules_hash`), so the same rules keep their round and other rules start a new one even under the same
-        name; older sources (Hits' "Play these") have only their name."""
+        """(kind, key) of rormpc's source: its `source_id` (kept across filter changes, so the round goes on), else
+        the canonical hash of the rules rormpc's Play applied (`rules_hash`: the same rules keep their round, other
+        rules start a new one even under the same name), else (Hits' "Play these") its name."""
         src = (read_state("source") or {}).get("source") or {}
+        sid = src.get("source_id")
+        if isinstance(sid, str) and sid:
+            return src.get("kind"), f"id:{sid}"
         return src.get("kind"), src.get("rules_hash") or src.get("name")
+
+    def banned_files(self):
+        """The files banned now (banned.jsonl in data_dir), read again when the log changes."""
+        try:
+            mtime = banned.log_path().stat().st_mtime_ns
+        except OSError:
+            mtime = None
+        if self._banned[0] != mtime:
+            self._banned = (mtime, banned.files() if mtime is not None else set())
+        return self._banned[1]
 
     def round_members(self):
         """The files of a Hits source's snapshot plus the songs appended to it by hand (`added`), or None (an older
@@ -318,6 +353,7 @@ class Shuffle(Module):
         by_id = {int(s["id"]): s for s in q}
         waiting = self.upnext_ids(d)
         in_round = set(self.round["heard"]) if self.round else set()
+        bans = self.banned_files()
         keep, gone = [], []
         for k, e in enumerate(self.plan):
             s = by_id.get(e["id"])
@@ -325,7 +361,8 @@ class Shuffle(Module):
             # a next-round entry may have been heard in this round; that is why it waits for the next one
             ok = (s is not None and s["file"] == e["file"] and e["id"] not in waiting
                   and int(s.get("prio", 0)) in (0, *OWN_PRIOS)
-                  and not (c and c["until"] > now) and not (e.get("round", 0) == 0 and e["file"] in in_round))
+                  and not (c and c["until"] > now) and not (e.get("round", 0) == 0 and e["file"] in in_round)
+                  and e["file"] not in bans)
             (keep if ok else gone).append(e)
         self.plan = keep
         if gone:
@@ -341,17 +378,18 @@ class Shuffle(Module):
         self.ensure_round()
         waiting = self.upnext_ids(d)
         left_back = self.left_back()
+        bans = self.banned_files()
         # every song the plan could ever hold now, resting or not
         pool = [s for s in q if s.get("id") != current and int(s.get("prio", 0)) in (0, *OWN_PRIOS)
-                and int(s["id"]) not in waiting and s["file"] not in left_back]
+                and int(s["id"]) not in waiting and s["file"] not in left_back and s["file"] not in bans]
         members = None
         if self.round:
             # only the Hits snapshot: a song that was playing when the source was switched is not part of it
-            members = self.round_members() or {s["file"] for s in q}
+            members = (self.round_members() or {s["file"] for s in q}) - bans
             self.round["total"] = len(members)
             pool = [s for s in pool if s["file"] in members]
-            unheard = any(s["file"] not in self.round["heard"] and s["file"] in members
-                          for s in q if s.get("id") != current)
+            # the song playing counts too: it is heard only once it has played long enough
+            unheard = any(s["file"] not in self.round["heard"] and s["file"] in members for s in q)
             if not unheard and self.rounds == "auto" and self.round["heard"]:
                 self.advance_round(1)  # every song of the round was heard: the next one starts
             elif not unheard and not self.plan and self.rounds != "auto":
@@ -544,6 +582,21 @@ class Shuffle(Module):
         self.live.append({"t": round(now), "file": p["file"], "kind": kind})
         self.history = (self.history + [{"t": round(now), "id": p["id"], "file": p["file"], "kind": kind}])[-HISTORY_N:]
 
+    def count_heard(self, p):
+        """The timed song joins the round's heard once it has played as long as a scrobble needs (listen_needed),
+        in the round it started in (not after `shuffle newround` or another source); an off-source song never.
+        True when it was added now."""
+        if p.get("heard") or p["played"] < listen_needed(p["duration"]):
+            return False
+        p["heard"] = True
+        if not self.round or p.get("round") != [self.round.get("source"), self.round.get("number", 1)]:
+            return False
+        members = self.round_members()
+        if p["file"] in self.round["heard"] or (members is not None and p["file"] not in members):
+            return False
+        self.round["heard"].append(p["file"])
+        return True
+
     def left_back(self):
         """Files left with Previous during the current walk back: they are not put back into the plan."""
         return {e["file"] for e in self.trail[self.cursor + 1:]} if self.cursor is not None else set()
@@ -604,10 +657,10 @@ class Shuffle(Module):
         self.playing = {"id": int(s["songid"]), "file": file, "played": float(s.get("elapsed", 0) or 0),
                         "last": now, "running": s.get("state") == "play", "origin": origin,
                         "duration": float(s.get("duration", 0) or cur.get("duration", 0) or 0)}
+        if self.round:
+            # the round it started in: it is heard there once it has played long enough (count_heard)
+            self.playing["round"] = [self.round.get("source"), self.round.get("number", 1)]
         self.recent = [f for f in self.recent if f != file][-(RECENT_MAX - 1):] + [file]
-        members = self.round_members() if self.round else None
-        if self.round and file not in self.round["heard"] and (members is None or file in members):
-            self.round["heard"].append(file)  # an off-source song (playing across an Apply) is not in the round
 
     async def on_status(self, d, s, changed):
         dirty = self.ensure_round()
@@ -627,6 +680,9 @@ class Shuffle(Module):
             dirty = True
         self.random_seen = random_on
         self.tick(s, now)
+        # tick counted the timed song's last seconds also when it has just stopped being current
+        heard_now = bool(self.playing and self.count_heard(self.playing))
+        dirty = dirty or heard_now
         song = s.get("songid")
         if song != self.current:
             back = self.pending_prev
@@ -657,7 +713,8 @@ class Shuffle(Module):
             if self.plan:
                 await self.withdraw(d)
                 dirty = True
-        elif len(self.plan) < PLAN_N and not (self.round and self.round.get("done")):
+        elif (len(self.plan) < PLAN_N or heard_now) and not (self.round and self.round.get("done")):
+            # a song just heard may end the round: fill_plan moves it on even when the plan is full
             before = [e["id"] for e in self.plan]
             await self.fill_plan(d, q)
             dirty = dirty or [e["id"] for e in self.plan] != before

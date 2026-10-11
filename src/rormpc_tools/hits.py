@@ -39,7 +39,7 @@ Caches: ~/.cache/hits/.
 """
 import argparse, collections, datetime as dt, hashlib, json, os, pathlib, re, subprocess, sys, tempfile, time, urllib.parse, urllib.request
 
-from . import deleted, external, hits_exceptions, hits_rules, hits_sets, mbtag, musicdb, settings
+from . import banned, deleted, external, hits_exceptions, hits_rules, hits_sets, mbtag, musicdb, settings
 
 
 CACHE = pathlib.Path(os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")) / "hits"
@@ -863,7 +863,8 @@ def _show(a):
     label = make_label(a, period)
     print(f"# {label}   ✓ = in library, plays = your play count")
     rows, a.candidates, a.cohort, a.mine_plays = [], 0, 0, 0
-    a.pinned = a.excluded = 0
+    a.pinned = a.excluded = a.banned = 0
+    bans = banned.fold()
     genre_ok, artist_ok = genre_filter(a.genre), artist_filter(a.artist)
     exceptions = hits_exceptions.active()
     blocks = deleted.Blocks()
@@ -880,6 +881,10 @@ def _show(a):
             show_excluded=a.show_excluded, pins=gi == len(groups) - 1)
         a.pinned += xinfo["pinned"]
         a.excluded += xinfo["excluded"]
+        # banned songs leave every result after the ranks are set (like hidden chart songs: ranks never move)
+        kept = [s for s in part if not (s["file"] and banned.matches(bans, s["file"], s.get("mbid")))]
+        a.banned += len(part) - len(kept)
+        part = kept
         a.candidates += info["candidates"]
         a.cohort += info["cohort"]
         if r.rank == "plays" and r.years_of == "listened":
@@ -1004,7 +1009,8 @@ def write_json(a, label, rows, plays):
     then (exceptions) counts.pinned/excluded, args.show_excluded, rows' "pinned", "excluded", "exceptions",
     "song_id" and "chart_key"; then rows' "deleted" ({id, deleted_at, file} of a missing song deleted before, else
     null: not to be downloaded again, deleted.py); then (smart lists) args.open_list and args.open_list_name; then (named sets)
-    args.set_names {"tag:God": "Tag God", "list:ID": "Smart 80s party", ...}
+    args.set_names {"tag:God": "Tag God", "list:ID": "Smart 80s party", ...}; then (Banned)
+    counts.banned, the banned songs left out of the rows
     (rormpc's hits.rs parses a copy of this shape in its tests; tests/test_rormpc_contract.py checks this side)."""
     r = a.rules
     owned = sum(1 for s in rows if s["file"])
@@ -1021,7 +1027,7 @@ def write_json(a, label, rows, plays):
                                               "genre": a.genre, "artist": a.artist, "owned": a.owned},
            "formula": a.formula, "summary": a.summary,
            "counts": {"selected": len(rows), "owned": owned, "candidates": a.candidates, "cohort": a.cohort,
-                      "pinned": a.pinned, "excluded": a.excluded},
+                      "pinned": a.pinned, "excluded": a.excluded, "banned": a.banned},
            "rank_note": rank_note(a),
            "rows": [{"rank": s["rank"], "pct": s["pct"], "cohort": s["cohort"], "ranked": s["ranked"],
                      "artist": s["artist"], "title": s["title"], "year": row_year(s, r), "years": row_years(s),

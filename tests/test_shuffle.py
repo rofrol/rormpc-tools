@@ -85,6 +85,12 @@ def play(d, mpd, file):
     asyncio.run(d.step({"player"}))
 
 
+def listen(d, clock, seconds=shuffle.LISTEN_MAX_S):
+    """The song playing plays on for `seconds` (long enough to count as heard by default), then MPD wakes us."""
+    clock[0] += seconds
+    asyncio.run(d.step({"player"}))
+
+
 def send(d, mpd, *msgs):
     mpd.messages = list(msgs)
     asyncio.run(d.step({"message"}))
@@ -166,16 +172,18 @@ def test_heard_enough_cools_down_growing_and_skips_the_playing_song():
     assert "a" not in sh.cooldown
 
 
-def test_hits_round_plays_each_song_once_then_stops_in_manual_rounds():
+def test_hits_round_plays_each_song_once_then_stops_in_manual_rounds(clock):
     d, mpd, sh = setup(files=("a", "b", "c"), data={"c": heard(3)}, source={"kind": "hits", "name": "80s", "len": 3})
     send(d, mpd, "shuffle rounds manual")
     assert sh.round["source"] == "hits:80s"
+    listen(d, clock)
     seen = ["a"]
     while sh.nominee:
         f = sh.nominee["file"]
         assert f not in seen
         seen.append(f)
         play(d, mpd, f)
+        listen(d, clock)
     assert sorted(seen) == ["a", "b", "c"] and sh.round["done"]
     assert "round done" in player.read_state("shuffle")["reason"]
     sh.rests.clear()
@@ -209,7 +217,7 @@ def test_random_turned_off_elsewhere_turns_it_off():
     assert shuffle.Shuffle().enabled is False
 
 
-def test_replaced_queue_drops_the_gone_nominee_and_starts_a_round():
+def test_replaced_queue_drops_the_gone_nominee_and_starts_a_round(clock):
     d, mpd, sh = setup(data={"c": heard(3)})
     old = sh.nominee["id"]
     player.write_state("source", {"source": {"kind": "hits", "name": "80s", "len": 2}})
@@ -217,15 +225,18 @@ def test_replaced_queue_drops_the_gone_nominee_and_starts_a_round():
     mpd.cur = "90"
     asyncio.run(d.step({"playlist", "player"}))
     assert sh.nominee and sh.nominee["id"] != old and sh.nominee["file"] == "y"
-    assert sh.round["source"] == "hits:80s" and sh.round["heard"] == ["x"]
+    assert sh.round["source"] == "hits:80s" and sh.round["heard"] == []
+    listen(d, clock)
+    assert sh.round["heard"] == ["x"]
 
 
-def test_play_rules_hash_keys_the_round_and_the_off_source_song_stays_out():
+def test_play_rules_hash_keys_the_round_and_the_off_source_song_stays_out(clock):
     src = {"kind": "hits", "name": "80s", "len": 2, "files": ["b", "c"], "rules_hash": "h1"}
     d, mpd, sh = setup(files=("a", "b", "c"), data={"b": heard(3), "c": heard(3)}, source=src)
     # "a" played when the source was applied: it plays on, outside the round
     assert sh.round["source"] == "hits:h1" and sh.round["heard"] == [] and sh.round["total"] == 2
     play(d, mpd, "b")
+    listen(d, clock)
     assert sh.round["heard"] == ["b"]
     # Apply of the same rules (another snapshot of them) keeps the round
     player.write_state("source", {"source": {**src, "len": 3}})
@@ -236,6 +247,7 @@ def test_play_rules_hash_keys_the_round_and_the_off_source_song_stays_out():
     asyncio.run(d.step({"player"}))
     assert sh.round["source"] == "hits:h2" and sh.round["heard"] == [] and sh.round["total"] == 1
     play(d, mpd, "a")
+    listen(d, clock)
     assert "a" not in sh.round["heard"]
 
 
@@ -293,12 +305,14 @@ def test_heard_enough_on_the_head_plans_again_without_it():
 
 
 
-def test_a_song_appended_to_a_hits_source_joins_its_round_even_after_it_was_done():
+def test_a_song_appended_to_a_hits_source_joins_its_round_even_after_it_was_done(clock):
     src = {"kind": "hits", "name": "80s", "len": 2, "files": ["b", "c"], "rules_hash": "h1"}
     d, mpd, sh = setup(files=("x", "b", "c"), data={"b": heard(3), "c": heard(3)}, source=src)
     send(d, mpd, "shuffle rounds manual")
     play(d, mpd, "b")
+    listen(d, clock)
     play(d, mpd, "c")
+    listen(d, clock)
     assert sh.round["done"] and sh.round["heard"] == ["b", "c"]
     # rormpc's Browse appends "z" with weighted on: source.json lists it in `added`, the rules hash stays
     mpd.q.append({"id": "9", "file": "z", "prio": 0})
@@ -307,6 +321,7 @@ def test_a_song_appended_to_a_hits_source_joins_its_round_even_after_it_was_done
     assert sh.round["source"] == "hits:h1" and not sh.round["done"] and sh.round["total"] == 3
     assert [e["file"] for e in sh.plan] == ["z"]
     play(d, mpd, "z")
+    listen(d, clock)
     assert sh.round["heard"] == ["b", "c", "z"]
 
 

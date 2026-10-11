@@ -5,7 +5,7 @@ import asyncio
 
 from rormpc_tools import player
 from rormpc_tools.player import shuffle
-from test_shuffle import DAY, clock, heard, play, send, setup, state  # noqa: F401 (fixtures)
+from test_shuffle import DAY, clock, heard, listen, play, send, setup, state  # noqa: F401 (fixtures)
 
 FILES = tuple("abcdefghijklmn")  # 14: "a" plays, 13 to plan
 
@@ -40,7 +40,9 @@ def test_the_round_rolls_when_its_last_song_plays_and_the_marks_move_up(clock):
     play(d, mpd, sh.plan[0]["file"])
     assert sh.round["number"] == 1
     clock[0] += 200
-    play(d, mpd, sh.plan[0]["file"])  # the round's last song: every song heard, the next round starts
+    play(d, mpd, sh.plan[0]["file"])  # the round's last song: the round goes on while it plays
+    assert sh.round["number"] == 1
+    listen(d, clock)  # once it is heard, every song was: the next round starts
     assert sh.round["number"] == 2 and sh.round["heard"] == [] and not sh.round["done"]
     assert len(sh.plan) == shuffle.PLAN_N and all(e["round"] == 0 for e in sh.plan)
 
@@ -54,7 +56,9 @@ def test_a_round_left_with_resting_songs_moves_on_when_its_next_round_entry_play
     head = sh.plan[0]["file"]
     clock[0] += 200
     play(d, mpd, head)
-    assert sh.round["number"] == 2 and sh.round["heard"] == [head]
+    assert sh.round["number"] == 2 and sh.round["heard"] == []
+    listen(d, clock)
+    assert sh.round["heard"] == [head]
     assert all(e["round"] == 0 for e in sh.plan)
 
 
@@ -65,7 +69,7 @@ def test_rounds_continue_by_themselves(clock):
         clock[0] += 200
         play(d, mpd, f)
     sh.rests.clear()
-    asyncio.run(d.step({"player"}))
+    listen(d, clock)
     assert sh.round["number"] == 2 and not sh.round["done"] and sh.plan
     assert "round done" not in player.read_state("shuffle")["reason"]
 
@@ -79,7 +83,7 @@ def test_manual_rounds_stop_until_newround(clock):
         clock[0] += 200
         play(d, mpd, f)
     sh.rests.clear()
-    asyncio.run(d.step({"player"}))
+    listen(d, clock)  # c is heard: the round is done
     assert sh.round["done"] and not sh.plan
     send(d, mpd, "shuffle newround")
     assert sh.plan and sh.round["number"] == 2

@@ -20,6 +20,8 @@
   musicdb restore ID [--yes]            # any deletion back: file (Trash or downloaded again), stickers, history,
                                         # ListenBrainz listens, YouTube playlists; dry run without --yes
   musicdb keep|unkeep [FILE...]         # not a deletion candidate: drop it from the "Not finished" playlist
+  musicdb ban|unban [FILE...]           # never play / never filter in (file and ListenBrainz kept; banned.py);
+  musicdb ban --undo                    # unban the newest ban (repeatable); musicdb banned [--json]: the list
   musicdb tag add|remove|list|of ...   # hand-made lists (God, melancholic, ...); musicdb tag --help
   musicdb genre add|exclude|reset GENRE --current   # correct a song's MusicBrainz genres
   musicdb chart [--bucket month] [--open]  # HTML page: how my most played songs rose and fell
@@ -152,7 +154,7 @@ def export(_a):
             json.dumps({k: v for k, v in zip(cols, r) if v not in ("", None)}, ensure_ascii=False) + "\n" for r in rows))
     git = lambda *a: subprocess.run(["git", "-C", str(DATA), *a], capture_output=True, text=True)
     # the hand-written logs (tag lists, manual genres, hidden hits) are committed with the hourly export
-    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl", "likes.jsonl", "aliases.jsonl", "versions.jsonl", "songs.jsonl", "exceptions.jsonl", "smartlists.jsonl")
+    logs = [f for f in ("collections.jsonl", "genres.jsonl", "hits-hidden.jsonl", "not-finished-keep.jsonl", "likes.jsonl", "aliases.jsonl", "versions.jsonl", "songs.jsonl", "exceptions.jsonl", "smartlists.jsonl", "banned.jsonl")
             if (DATA / f).exists()]
     git("add", "events.jsonl", "favorites.jsonl", "tombstones.jsonl", "skips.jsonl", "deletions", *logs)
     if git("diff", "--cached", "--quiet").returncode:
@@ -986,7 +988,7 @@ def delete(a):
     and the local plays (kept as tombstones that re-imports skip). Each song is journaled in pending.jsonl before
     anything is touched; a failed remote step stays there and `musicdb update` retries it.
     --preview prints what a deletion would touch as JSON and changes nothing; --youtube adds the live YouTube lookup."""
-    files = a.files or [f for f in os.environ.get("SELECTED_SONGS", os.environ.get("FILE", "")).splitlines() if f]
+    files = selected_files(a)
     if not files:
         sys.exit("no song given")
     c, lib, m = db(), library(), mpd()
@@ -1166,6 +1168,49 @@ def undo(a):
     print(f"Restored: {r['file'].rsplit('/', 1)[-1]}" + ("" if kept else " (its deleted listens stay deleted)"))
 
 
+def selected_files(a):
+    """Songs from the arguments, else rmpc's $SELECTED_SONGS, else $FILE (the playing song), as `delete` takes them."""
+    return a.files or [f for f in os.environ.get("SELECTED_SONGS", os.environ.get("FILE", "")).splitlines() if f]
+
+
+def ban_cmd(a):
+    """musicdb ban|unban [FILE...], musicdb ban --undo (banned.py)."""
+    from . import banned, tags
+    if a.cmd == "ban" and a.undo:
+        rows = banned.undo_last()
+        if not rows:
+            sys.exit("Nothing to undo")
+        print("Unbanned: " + ", ".join(f"{r['artist']} - {r['title']}".strip(" -") or r["file"] for r in rows))
+        return
+    files = selected_files(a)
+    if not files:
+        sys.exit("no song given")
+    m = mpd()
+    refs = [tags.song_ref(m, f) for f in files]
+    rows = banned.ban(refs) if a.cmd == "ban" else banned.unban(refs)
+    names = ", ".join(f"{r['artist']} - {r['title']}".strip(" -") or r["file"] for r in rows)
+    if not rows:
+        print(f"{'Already banned' if a.cmd == 'ban' else 'Not banned'}: {', '.join(files)}")
+        return
+    print(f"{'Banned' if a.cmd == 'ban' else 'Unbanned'}: {names}")
+
+
+def banned_cmd(a):
+    """musicdb banned [--json]: the songs banned now, newest first."""
+    from . import banned
+    rows = [{k: e.get(k) for k in ("key", "file", "artist", "title", "ts")} for e in banned.current()]
+    if a.json:
+        print(json.dumps({"version": BANNED_VERSION, "songs": rows}, ensure_ascii=False))
+        return
+    for r in rows:
+        print(f"{r['ts'][:10]}  {r['artist']} - {r['title']}  ({r['file']})")
+    if not rows:
+        print("nothing banned")
+
+
+BANNED_VERSION = 1  # of `musicdb banned --json`, read by rormpc's Banned list; bump on a change of meaning
+
+
 def other_copies(mbid, rel):
     """Library files other than rel with the same recording MBID: their listens must stay on ListenBrainz."""
     return [s["file"] for s in mpd().find("musicbrainz_trackid", mbid) if s.get("file") != rel] if mbid else []
@@ -1340,6 +1385,13 @@ def main():
     for verb in ("keep", "unkeep"):
         p = sp.add_parser(verb, help="(un)mark songs as not deletion candidates (Not finished)")
         p.add_argument("files", nargs="*"); p.set_defaults(fn=keep_cmd, cmd=verb)
+    for verb in ("ban", "unban"):
+        p = sp.add_parser(verb, help="never play / never filter in again (unban: undo); file and ListenBrainz kept")
+        p.add_argument("files", nargs="*", help="paths relative to the music dir")
+        if verb == "ban":
+            p.add_argument("--undo", action="store_true", help="unban the songs of the newest ban (repeatable)")
+        p.set_defaults(fn=ban_cmd, cmd=verb, undo=False)
+    p = sp.add_parser("banned"); p.add_argument("--json", action="store_true"); p.set_defaults(fn=banned_cmd)
     p = sp.add_parser("deletions"); p.add_argument("--retry", action="store_true")
     p.add_argument("action", nargs="?", choices=("allow", "block"),
                    help="allow: the deleted song may be downloaded again; block: never again (the default)")
