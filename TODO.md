@@ -11,7 +11,7 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
 
 ## Next, in order
 
-- [ ] Release years, stage B2 backend (moved from rormpc's TODO t-j74galug, decided 2026-10-10 and 2026-10-11): [t-bd3334hn]
+- [x] Release years, stage B2 backend (moved from rormpc's TODO t-j74galug, decided 2026-10-10 and 2026-10-11): [t-bd3334hn]
       - `musicdb years --mbid ROW MBID` also rewrites the file's MusicBrainz recording tag (UFID, which the
         scrobbler sends as recording_mbid). Decided by the user 2026-10-11 (d-hkqe4mfl).
       - The report marks the files without a recording MBID (class no-recording, about 165), so rormpc can list
@@ -20,8 +20,8 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
       Plan: docs/release-years-plan.md. When it is released, tell todo-rormpc "landed <tag>": its MBID picker and
       filter wait on it.
       Built 2026-10-12: f15e775 (apply writes the UFID, rollback restores it, `identity.rekey` moves the `mb:`
-      keys), version 0.2.54 in 2a10a4f. Left: tag v0.2.54, push, "landed v0.2.54" to todo-rormpc. Decided by the
-      user 2026-10-12 (d-gm4tvmnb): tag and push.
+      keys), version 0.2.54 in 2a10a4f. Tag v0.2.54 pushed (decided by the user 2026-10-12,
+      d-gm4tvmnb), "landed v0.2.54" sent to todo-rormpc.
 - [ ] Media keys: `pause` (key, Now Playing, MPRIS) while "Pause for…" holds the pause cancels the timer and stays [t-jeibd5n3]
       paused. Decided by the user 2026-10-11 (d-h2in7kd6). Code: player/control.py `_pause`.
 - [ ] Transcribed lyrics (moved from rormpc's TODO t-dmpfe6gj). Plan: docs/transcribe-lyrics-plan.md, cd7fe61. [t-jsjs5ngd]
@@ -50,6 +50,16 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
       this repository ("the repository has no master commit"; its branch is `main`, herdr report r-12), so describe
       the flow that works here (`herdr worker start --base <main sha>`, `herdr worker verify`, cherry-pick onto
       `main`) until herdr supports `main`.
+- [ ] Releases without the auto-mode classifier blocking them (the user's request 2026-10-12: "and so the
+      classifier does not block it; ask the herdr coordinator"). `git tag v0.2.54 && git push origin main v0.2.54`
+      was refused as "Create Public Surface" until the user approved it (d-gm4tvmnb). todo-herdr's answer
+      (herdr TODO 1d9be089, t-oe3wrkvz): no broad allow rule; instead a reviewed `scripts/release.sh <version>` that
+      refuses unless on a clean `main` equal to origin/main plus the release commit, the version matches
+      pyproject.toml and the pattern, and the tag does not exist; then it creates the annotated tag, gates on
+      `uv run pytest -q` without a pipe, and pushes `main` as a fast-forward and only that tag (never --force, never
+      --tags). Document it in AGENTS.md's release paragraph. Once committed, send its path to todo-herdr
+      (herdr-85), who asks the user for one allow rule on that absolute path; later herdr's driver runs release
+      recipes itself.
 
 ## Proposed
 
