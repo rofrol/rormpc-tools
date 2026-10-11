@@ -93,6 +93,79 @@ def key(path, mbid=None):
     return f"yt:{y}" if y else f"mb:{mbid}" if mbid else f"file:{path}"
 
 
+def rekey(path, old_mbid, new_mbid, others=()):
+    """The file at `path` now carries recording `new_mbid` instead of `old_mbid` (`musicdb years --apply` or its
+    rollback): what is keyed by its song key follows it. The hand-made lists and manual genres (tags.py), bans
+    (banned.jsonl) and version labels and play decisions (versions.jsonl) under the old key are logged again under
+    the new one, unless the new key already has its own; the old key's entries are taken back unless another
+    library file in `others` (files with `old_mbid`) still has that key. ListenBrainz listens carry the recording
+    MBID they were scrobbled with: a `musicdb versions` decision credits the old MBID's listens to this file, unless
+    one of `others` still matches them by that MBID. Returns what moved."""
+    import datetime as dt
+    from . import banned, tags, versions
+    old, new = key(path, old_mbid), key(path, new_mbid)
+    out = {"from": old, "to": new, "lists": 0, "genres": 0, "banned": 0, "labels": 0, "plays": False}
+    ts = dt.datetime.now().isoformat(timespec="seconds")
+    if old != new:
+        keep = any(key(f, old_mbid) == old for f in others)
+        moved = {"rekeyed": ts, "rekeyed_from": old}
+        song = lambda s: dict(s, key=new, file=path, mbid=new_mbid)
+        rows = []
+        for name, songs in tags.lists().items():
+            if e := songs.get(old):
+                if new not in songs:
+                    rows.append(dict(e, song=song(e["song"])) | moved)  # the add's ts: its place in the list holds
+                    out["lists"] += 1
+                if not keep:
+                    rows.append({"ts": ts, "list": name, "action": "remove", "song": e["song"]} | moved)
+        if rows:
+            tags.append(tags.LISTS, rows)
+        state = tags.manual_genres()
+        ref = next((e["song"] for e in reversed(tags.events(tags.GENRES)) if e["song"]["key"] == old), None)
+        if ref and (s := state.get(old)):
+            mine = state.get(new, {"add": set(), "exclude": set()})
+            rows = []
+            for g in sorted(s["add"] | s["exclude"]):
+                if g not in mine["add"] | mine["exclude"]:
+                    rows.append({"ts": ts, "genre": g, "action": "add" if g in s["add"] else "exclude",
+                                 "song": song(ref)} | moved)
+                    out["genres"] += 1
+                if not keep:
+                    rows.append({"ts": ts, "genre": g, "action": "reset", "song": ref} | moved)
+            if rows:
+                tags.append(tags.GENRES, rows)
+        state = banned.fold()
+        if e := state.get(old):
+            rows = []
+            if new not in state:  # the same op: `musicdb ban --undo` still takes back the whole ban command
+                rows.append(dict(e, key=new, file=path) | moved)
+                out["banned"] += 1
+            if not keep:
+                rows.append({"ts": ts, "action": "unban", "key": old, "file": e.get("file"),
+                             "artist": e.get("artist", ""), "title": e.get("title", ""), "op": uuid.uuid4().hex} | moved)
+            if rows:
+                banned.append(rows)
+        st = versions.fold()
+        rows = []
+        if e := st["labels"].get(old):
+            if new not in st["labels"]:
+                rows.append(dict(e, ts=ts, key=new, file=path) | moved)
+                out["labels"] += 1
+            if not keep:
+                rows.append({"ts": ts, "action": "label", "file": e.get("file"), "key": old, "version": "clear"}
+                            | moved)
+        for e in st["tracks"].values():  # decisions naming this file follow it when it is renamed later
+            if e["action"] == "set" and e.get("key") == old and e.get("file") == path:
+                rows.append(dict(e, ts=ts, key=new) | moved)
+        if rows:
+            versions.log(rows)
+    if old_mbid and old_mbid != new_mbid and not others:
+        versions.log([{"ts": ts, "action": "set", "source": "lb", "track": f"mb:{old_mbid}", "group": None,
+                       "file": path, "key": new, "rekeyed": ts}])
+        out["plays"] = True
+    return out
+
+
 # ------------------------------------------------------------------ tags
 
 def read_tags(rel):

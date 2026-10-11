@@ -147,19 +147,35 @@ go at the top. Nothing is written in a dry run.
   MBID"; no MusicBrainz recording in the tags: "needs MBID"; recording not found; nothing studio found); and rows
   whose year holds but whose release group is dated earlier (`keeps-year`, e.g. reissue-only recordings).
 - `--mbid ROW MBID` names the recording a file is (until stage B's picker): the row is computed again from it, kept
-  across reruns, and needs a new decision. It changes only the year's source, not the file's recording tag.
+  across reruns, and needs a new decision. Once accepted, `--apply` also writes it as the file's recording tag (ID3
+  UFID "http://musicbrainz.org", which MPD reads as `MUSICBRAINZ_TRACKID` and the scrobbler sends as
+  `recording_mbid`; FLAC/Ogg `MUSICBRAINZ_TRACKID`), even when the year holds (decided by the user 2026-10-11). A row
+  whose picked recording MusicBrainz does not know cannot be accepted.
+- Files without a recording MBID in their tags are class `no-recording` (and "needs MBID") in the report and in
+  `--json`, so rormpc can filter them.
 - rormpc's "Years to review" view (stage B) reads `musicdb years --json` (the report, `version` 1) and writes
   decisions through `--accept` / `--reject` / `--mbid`; the apply step stays in rormpc-tools.
 
 ## Writing and undo
 
 - Apply only accepted rows whose audio hash (the md5 `songs.jsonl` and dedupe use, of the audio stream, so a tag
-  write keeps it) and date tags are what the report saw; a changed file is skipped and reported.
+  write keeps it) and date tags are what the report saw, and, for a row with `--mbid`, whose recording tag is what
+  `--mbid` (or the last dry run) read (`file_mbid` in the row); a changed file is skipped and reported, as is a file
+  type that cannot carry the recording tag.
 - Before writing, append the old TDRC, TDOR, `DATE_SOURCE` and `DATE_RULE` of each file to `years-backup.jsonl` in
   the data directory (fsynced), then write the tags to a temporary copy in the same directory and `os.replace` it
   over the original, so MPD never reads a half-written file.
+- A rewritten recording tag is in the same backup entry (`old_recording`, `new_recording`, null for none).
+- What is keyed by the song (`identity.key`: `mb:<recording>` for a file without a YouTube id) follows the new
+  recording at apply (`identity.rekey`): hand-made lists (`collections.jsonl`), manual genres (`genres.jsonl`), bans
+  (`banned.jsonl`) and version labels and decisions (`versions.jsonl`) are logged again under the new key and taken
+  back from the old one, unless another library file still has the old key (then they are copied). ListenBrainz
+  listens keep the recording MBID they were scrobbled with: a `musicdb versions` decision for the old MBID credits
+  them to the file, unless another file still has that MBID. The registry (`songs.jsonl`) keys the file by its UUID
+  tag, which the write keeps, and `musicdb sync` credits the scrobbler's own log by path, so the counts hold.
 - `--rollback [ID...]` restores the backup values the same way: the newest apply per file not rolled back yet, and
-  only while the file still has the values that apply wrote. The rolled-back row goes back to `undecided`.
+  only while the file still has the values that apply wrote (the recording tag too: the old one goes back, or the tag
+  is removed when the file had none, and the keys move back). The rolled-back row goes back to `undecided`.
 - After writing, `mpc update` for the touched directories so MPD's `Date` / `OriginalDate` change.
 
 ## Rate limits and run time

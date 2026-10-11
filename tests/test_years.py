@@ -3,7 +3,7 @@ decisions, and apply / rollback on temporary files. No network: mbtag.http answe
 import json, shutil, subprocess, types, urllib.parse
 
 import pytest
-from mutagen.id3 import ID3, TDOR, TDRC, TXXX
+from mutagen.id3 import ID3, TDOR, TDRC, TXXX, UFID
 
 from rormpc_tools import mbtag, musicdb, years
 
@@ -231,6 +231,8 @@ def mp3(path, freq, date, mbid=None):
                    check=True)
     t = ID3()
     t.add(TDRC(text=[date])); t.add(TDOR(text=[date])); t.add(TXXX(desc="YouTube ID", text=["x"]))
+    if mbid:
+        t.add(UFID(owner="http://musicbrainz.org", data=mbid.encode()))
     t.save(path)
 
 
@@ -242,14 +244,14 @@ def lib(env, mb, tmp_path, monkeypatch):
     monkeypatch.setattr(years, "mpc_update", lambda dirs: updates.append(sorted(dirs)))
     sweet_dreams(mb)
     mb.add(rec("lonely", "Other", 200_000, "2001"), [release("2001")])
-    mp3(music / "eu/Sweet Dreams.mp3", 440, "2000")
-    mp3(music / "Other.mp3", 550, "2001")
-    mp3(music / "Plain.mp3", 660, "1983")
-    env([{"file": "eu/Sweet Dreams.mp3", "musicbrainz_trackid": "video"},
+    mp3(music / "eu/Sweet Dreams.mp3", 440, "2000", "video")
+    mp3(music / "Other.mp3", 550, "2001", "lonely")
+    mp3(music / "Plain.mp3", 660, "1983", "audio")
+    m = env([{"file": "eu/Sweet Dreams.mp3", "musicbrainz_trackid": "video"},
          {"file": "Other.mp3", "musicbrainz_trackid": "lonely"}, {"file": "Plain.mp3", "musicbrainz_trackid": "audio"},
          {"file": "Unknown.mp3"}])
     mp3(music / "Unknown.mp3", 770, "1999")
-    return types.SimpleNamespace(music=music, updates=updates, mb=mb)
+    return types.SimpleNamespace(music=music, updates=updates, mb=mb, mpd=m)
 
 
 def run(*argv):
@@ -369,3 +371,153 @@ def test_flac_fields(tmp_path):
     assert years.read_dates(p) == {"TDRC": "2000", "TDOR": "1983", "DATE_SOURCE": "musicbrainz:x", "DATE_RULE": "own"}
     years.write_dates(p, {"TDRC": "2000", "TDOR": None, "DATE_SOURCE": None, "DATE_RULE": None})
     assert years.read_dates(p)["TDOR"] is None
+
+
+# ------------------------------------------------------------------ --mbid: the file's recording tag
+
+KNOWN = "bbbbbbbb-0000-0000-0000-000000000000"
+
+
+@needs_ffmpeg
+def test_files_without_a_recording_are_class_no_recording_in_the_json(lib, capsys):
+    run("--dry-run")
+    capsys.readouterr()
+    run("--json")
+    rep = json.loads(capsys.readouterr().out)
+    [u] = [r for r in rep["rows"] if r["file"] == "Unknown.mp3"]
+    assert (u["classes"], u["needs_mbid"], u["mbid"]) == (["no-recording"], True, None)
+    assert rep["counts"]["class"]["no-recording"] == 1
+    assert all("no-recording" not in r["classes"] for r in rep["rows"] if r["mbid"])
+
+
+def pick(lib, file, mbid=KNOWN, tdor="1995-02-02"):
+    """--mbid on `file`'s row with a recording MusicBrainz dates `tdor`; then accept it. Returns the row."""
+    lib.mb.add(rec(mbid, "Other", 200_000, tdor[:4], works=[("w9", ())]), [release(tdor, "Other", "Single")])
+    run("--dry-run")
+    row = rows()[file]
+    run("--mbid", str(row["id"]), mbid)
+    run("--accept", str(row["id"]))
+    return rows()[file]
+
+
+@needs_ffmpeg
+def test_apply_writes_the_picked_recording_and_rollback_puts_the_old_one_back(lib, capsys):
+    row = pick(lib, "Other.mp3")
+    assert row["file_mbid"] == "lonely"
+    path = lib.music / "Other.mp3"
+    capsys.readouterr()
+    run("--apply", "--json")
+    out = json.loads(capsys.readouterr().out)
+    assert out["applied"][0]["recording"]["old"] == "lonely" and out["applied"][0]["recording"]["new"] == KNOWN
+    assert years.read_recording(path) == KNOWN and years.read_dates(path)["TDOR"] == "1995-02-02"
+    assert ID3(path)["TXXX:YouTube ID"].text == ["x"]
+    e = musicdb.jsonl(years.backup_path())[-1]
+    assert (e["old_recording"], e["new_recording"]) == ("lonely", KNOWN)
+    run("--rollback")
+    assert years.read_recording(path) == "lonely" and years.read_dates(path)["TDOR"] == "2001"
+    assert rows()["Other.mp3"]["decision"] == "undecided"
+
+
+@needs_ffmpeg
+def test_rollback_removes_a_recording_tag_the_file_did_not_have(lib):
+    pick(lib, "Unknown.mp3")
+    path = lib.music / "Unknown.mp3"
+    run("--apply")
+    assert years.read_recording(path) == KNOWN
+    run("--rollback")
+    assert years.read_recording(path) is None and "UFID:http://musicbrainz.org" not in ID3(path)
+
+
+@needs_ffmpeg
+def test_a_picked_recording_is_not_written_over_a_recording_tag_changed_since_the_report(lib, capsys):
+    pick(lib, "Other.mp3")
+    path = lib.music / "Other.mp3"
+    t = ID3(path); t.delall("UFID"); t.add(UFID(owner="http://musicbrainz.org", data=b"someone-else")); t.save(path)
+    capsys.readouterr()
+    run("--apply", "--json")
+    out = json.loads(capsys.readouterr().out)
+    assert out["applied"] == [] and out["skipped"][0]["why"] == "recording tag changed since the report"
+    assert years.read_recording(path) == "someone-else" and years.read_dates(path)["TDOR"] == "2001"
+
+
+@needs_ffmpeg
+def test_a_picked_recording_with_the_same_year_is_still_written(lib):
+    row = pick(lib, "Other.mp3", tdor="2001-03-03")
+    assert row["proposed"] is None and "keeps-year" in row["classes"] and row["decision"] == "accepted"
+    path = lib.music / "Other.mp3"
+    run("--apply")
+    assert years.read_recording(path) == KNOWN
+    assert years.read_dates(path) == {"TDRC": "2001", "TDOR": "2001", "DATE_SOURCE": None, "DATE_RULE": None}
+    run("--rollback")
+    assert years.read_recording(path) == "lonely"
+
+
+@needs_ffmpeg
+def test_a_recording_musicbrainz_does_not_know_cannot_be_accepted(lib):
+    run("--dry-run")
+    other = rows()["Other.mp3"]
+    run("--mbid", str(other["id"]), "aaaaaaaa-0000-0000-0000-000000000000")
+    with pytest.raises(SystemExit):
+        run("--accept", str(other["id"]))
+
+
+@pytest.fixture
+def keyed(lib, tmp_path, monkeypatch):
+    """Other.mp3 (no YouTube id: keyed mb:lonely) on a list, with manual genres, banned and labelled."""
+    from rormpc_tools import banned, tags, versions
+    monkeypatch.setattr(tags, "LISTS", tmp_path / "music-data" / "collections.jsonl")
+    monkeypatch.setattr(tags, "GENRES", tmp_path / "music-data" / "genres.jsonl")
+    monkeypatch.setattr(banned, "DATA", tmp_path / "music-data")
+    song = {"key": "mb:lonely", "file": "Other.mp3", "ytid": None, "mbid": "lonely", "artist": "A", "title": "Other"}
+    tags.append(tags.LISTS, [{"ts": "2026-01-01T00:00:00", "list": "God", "action": "add", "song": song}])
+    tags.append(tags.GENRES, [{"ts": "2026-01-01T00:00:00", "genre": "rock", "action": "add", "song": song},
+                              {"ts": "2026-01-01T00:00:00", "genre": "pop", "action": "exclude", "song": song}])
+    banned.ban([song])
+    versions.log([{"ts": "2026-01-01T00:00:00", "action": "label", "file": "Other.mp3", "key": "mb:lonely",
+                   "version": "live"}])
+    return types.SimpleNamespace(tags=tags, banned=banned, versions=versions)
+
+
+def keys_now(k):
+    return {"lists": set(k.tags.lists().get("God", {})),
+            "genres": {key: (sorted(s["add"]), sorted(s["exclude"])) for key, s in k.tags.manual_genres().items()
+                       if s["add"] or s["exclude"]},
+            "banned": set(k.banned.fold()), "labels": set(k.versions.fold()["labels"])}
+
+
+def credited(lib, mbid):
+    """The file a ListenBrainz listen of recording `mbid` is credited to (its name matches no file)."""
+    lib_ = musicdb.library()
+    files = musicdb.library_files(lib_)
+    musicdb.prepare(lib_, files)
+    return musicdb.event_file(lib_, files, "lb", None, mbid, "Nobody", "Nothing", "")
+
+
+@needs_ffmpeg
+def test_the_songs_mb_keys_and_listens_follow_the_new_recording_and_back(lib, keyed):
+    pick(lib, "Other.mp3")
+    run("--apply")
+    lib.mpd.songs[1]["musicbrainz_trackid"] = KNOWN  # what MPD reads after its update
+    k = keys_now(keyed)
+    assert k == {"lists": {f"mb:{KNOWN}"}, "genres": {f"mb:{KNOWN}": (["rock"], ["pop"])},
+                 "banned": {f"mb:{KNOWN}"}, "labels": {f"mb:{KNOWN}"}}
+    assert keyed.banned.matches(keyed.banned.fold(), "Other.mp3", KNOWN)
+    assert credited(lib, "lonely") == "Other.mp3"  # the listens scrobbled with the old recording keep counting
+    assert credited(lib, KNOWN) == "Other.mp3"
+    run("--rollback")
+    lib.mpd.songs[1]["musicbrainz_trackid"] = "lonely"
+    assert keys_now(keyed) == {"lists": {"mb:lonely"}, "genres": {"mb:lonely": (["rock"], ["pop"])},
+                               "banned": {"mb:lonely"}, "labels": {"mb:lonely"}}
+    assert credited(lib, KNOWN) == "Other.mp3" and credited(lib, "lonely") == "Other.mp3"
+
+
+@needs_ffmpeg
+def test_mb_keys_another_file_still_has_stay_and_are_copied(lib, keyed):
+    mp3(lib.music / "Copy.mp3", 990, "2001", "lonely")
+    lib.mpd.songs.append({"file": "Copy.mp3", "musicbrainz_trackid": "lonely"})
+    pick(lib, "Other.mp3")
+    run("--apply")
+    k = keys_now(keyed)
+    assert k["lists"] == {"mb:lonely", f"mb:{KNOWN}"} and k["banned"] == {"mb:lonely", f"mb:{KNOWN}"}
+    assert set(k["genres"]) == {"mb:lonely", f"mb:{KNOWN}"} and k["labels"] == {"mb:lonely", f"mb:{KNOWN}"}
+    assert ("lb", "mb:lonely") not in keyed.versions.fold()["tracks"]  # Copy.mp3 still matches those listens

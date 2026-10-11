@@ -5,13 +5,15 @@
   musicdb years --accept ID ... / --reject ID ... / --undecide ID ...   # record decisions in the report
   musicdb years --mbid ROW MBID              # the recording this file is, by hand (rows marked "needs MBID")
   musicdb years --apply                      # write the accepted rows whose audio and tags are unchanged
+                                             # (a row with --mbid also gets that recording in the file's tag)
   musicdb years --rollback [ID ...]          # put back the values the newest apply of each file replaced
 
 Year definition (docs/release-years-plan.md): TDOR (MPD OriginalDate) is the song's original release, the year
 the views show; TDRC (MPD Date) stays this recording's own first release. Provenance in TXXX:DATE_SOURCE
 (`musicbrainz:<recording MBID>`, the recording the TDOR came from) and TXXX:DATE_RULE (`same-length`,
 `any-clean`, `own`; `first-release` when a download kept its recording's own first release). FLAC/Ogg: DATE,
-ORIGINALDATE, DATE_SOURCE, DATE_RULE.
+ORIGINALDATE, DATE_SOURCE, DATE_RULE. The recording tag `--mbid` rewrites: ID3 UFID "http://musicbrainz.org" (MPD's
+MUSICBRAINZ_TRACKID, the scrobbler's recording_mbid); FLAC/Ogg: MUSICBRAINZ_TRACKID.
 
 The rule, per file with a recording MBID:
   1. The matched recording is itself a version (remix, live, cover, cast, dub, bootleg, demo, re-recording,
@@ -45,6 +47,8 @@ SEARCH_MAX = 200  # candidates dated per work: popular standards have thousands 
 FIELDS = ("TDRC", "TDOR", "DATE_SOURCE", "DATE_RULE")
 VORBIS = {"TDRC": "date", "TDOR": "originaldate", "DATE_SOURCE": "date_source", "DATE_RULE": "date_rule"}
 AUDIO_EXT = (".mp3", ".flac", ".ogg", ".opus")
+UFID_OWNER = "http://musicbrainz.org"  # as mbtag.write_tags writes it
+KEEP = object()  # write_dates: the recording tag stays as it is
 
 SAME_AUDIO = re.compile(r"\b(dolby atmos|atmos|360(°| reality audio)?|spatial|stereo|mono|remaster(ed)?(\s+\d{4})?|"
                         r"clean|explicit|radio edit|single edit|edit|video (mix|edit|version)|album version|"
@@ -371,10 +375,42 @@ def read_dates(path):
     return out
 
 
-def set_dates(path, values):
-    """Set the four fields in place (None removes one)."""
+def read_recording(path):
+    """The recording MBID in the file's tags (ID3 UFID, else MUSICBRAINZ_TRACKID), or None."""
     import mutagen
-    from mutagen.id3 import TDOR, TDRC, TXXX
+    f = mutagen.File(path)
+    t = f.tags if f is not None else None
+    if t is None:
+        return None
+    if hasattr(t, "getall"):
+        u = t.get(f"UFID:{UFID_OWNER}")
+        return u.data.decode("ascii", "replace") if u and u.data else None
+    return (t.get("musicbrainz_trackid") or [None])[0]
+
+
+def recording_untaggable(path):
+    """Why the file cannot carry a recording tag here, or None when it can (ID3 or Vorbis comments)."""
+    import mutagen
+    from mutagen._vorbis import VComment
+    from mutagen.id3 import ID3
+    f = mutagen.File(path)
+    if f is None:
+        return "not an audio file mutagen can tag"
+    if f.tags is None:
+        try:
+            f.add_tags()
+        except Exception as e:  # noqa: BLE001 (mutagen raises its own types per format)
+            return f"no tags can be added: {e}"
+    if not isinstance(f.tags, (ID3, VComment)):
+        return f"no MusicBrainz recording tag for {type(f.tags).__name__} tags"
+    return None
+
+
+def set_dates(path, values, recording=KEEP):
+    """Set the four fields in place (None removes one); `recording`, when given, is the recording MBID tag (None
+    removes it)."""
+    import mutagen
+    from mutagen.id3 import TDOR, TDRC, TXXX, UFID
     f = mutagen.File(path)
     if f is None:
         raise ValueError(f"not an audio file mutagen can tag: {path}")
@@ -390,23 +426,32 @@ def set_dates(path, values):
             t.delall(f"TXXX:{k}")
             if values.get(k):
                 t.add(TXXX(encoding=3, desc=k, text=[values[k]]))
+        if recording is not KEEP:
+            t.delall(f"UFID:{UFID_OWNER}")
+            if recording:
+                t.add(UFID(owner=UFID_OWNER, data=recording.encode("ascii")))
     else:
         for k, v in VORBIS.items():
             if values.get(k):
                 t[v] = [values[k]]
             elif v in t:
                 del t[v]
+        if recording is not KEEP:
+            if recording:
+                t["musicbrainz_trackid"] = [recording]
+            elif "musicbrainz_trackid" in t:
+                del t["musicbrainz_trackid"]
     f.save()
 
 
-def write_dates(path, values):
-    """Write the fields to a copy in the same directory and os.replace it over the file: MPD never reads a
-    half-written file. The copy's name starts with a dot, which MPD does not index."""
+def write_dates(path, values, recording=KEEP):
+    """Write the fields (and the recording tag, when given) to a copy in the same directory and os.replace it over
+    the file: MPD never reads a half-written file. The copy's name starts with a dot, which MPD does not index."""
     path = pathlib.Path(path)
     tmp = path.with_name(f".{path.name}.years-tmp")
     shutil.copy2(path, tmp)
     try:
-        set_dates(tmp, values)
+        set_dates(tmp, values, recording)
         with open(tmp, "rb+") as f:
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -563,6 +608,7 @@ def dry_run(a):
         rows, next_id = [], old.get("next_id", 1)
         for n, (rel, mbid) in enumerate(files, 1):
             o = prev.get(ids.get(rel) or rel)
+            file_mbid = mbid
             mbid = (o or {}).get("mbid_override") or mbid
             cur = read_dates(musicdb.MUSIC / rel)
             try:
@@ -579,6 +625,7 @@ def dry_run(a):
                     rows.append(o)  # done (the file now has the proposal) or picked by hand: kept for the view
                 continue
             r["song_id"] = ids.get(rel)
+            r["file_mbid"] = read_recording(musicdb.MUSIC / rel) if o and o.get("mbid_override") else file_mbid
             same = o and o.get("proposed") == r["proposed"] and o.get("md5") == r["md5"] and o.get("current") == cur
             r["id"] = o["id"] if o else next_id
             next_id = max(next_id, r["id"] + 1)
@@ -597,6 +644,12 @@ def dry_run(a):
     return rep
 
 
+def acceptable(r):
+    """A row with a proposal, or with a recording picked by hand that MusicBrainz knows (its tag is written even
+    when the year holds)."""
+    return bool(r["proposed"]) or bool(r.get("mbid_override")) and "recording-not-found" not in r["classes"]
+
+
 def decide(ids, decision):
     with locked():
         rep = load_report()
@@ -604,7 +657,7 @@ def decide(ids, decision):
         bad = [i for i in ids if i not in by]
         if bad:
             sys.exit(f"musicdb years: no row {', '.join(map(str, bad))} in {report_path()}")
-        if decision == "accepted" and (none := [i for i in ids if not by[i]["proposed"]]):
+        if decision == "accepted" and (none := [i for i in ids if not acceptable(by[i])]):
             sys.exit(f"musicdb years: row {', '.join(map(str, none))} has no proposal to accept "
                      "(--mbid ROW MBID picks the recording)")
         for i in ids:
@@ -629,7 +682,7 @@ def set_mbid(row_id, mbid):
             "confidence": None, "classes": ["keeps-year"], "evidence": "the picked recording gives the same year",
             "detail": None, "needs_mbid": False}
         r.update(id=row_id, song_id=o.get("song_id"), mbid_override=mbid, decision="undecided", decided=None,
-                 applied=None)
+                 applied=None, file_mbid=read_recording(musicdb.MUSIC / o["file"]))
         rep["rows"] = [r if x["id"] == row_id else x for x in rep["rows"]]
         save_report(rep)
     return r
@@ -644,13 +697,25 @@ def append_backup(entry):
         os.fsync(f.fileno())
 
 
+def sharing(rel, mbid):
+    """The other library files MPD lists with recording `mbid`."""
+    if not mbid:
+        return []
+    return sorted(f for s in musicdb.mpd().listallinfo()
+                  if (f := s.get("file")) and f != rel and musicdb.one(s.get("musicbrainz_trackid", "")) == mbid)
+
+
 def apply(_a=None):
-    """Write the accepted rows whose audio (md5) and date tags are what the report saw; the old values go to
-    years-backup.jsonl (fsynced) before each write."""
+    """Write the accepted rows whose audio (md5), date tags and recording tag are what the report saw; the old
+    values go to years-backup.jsonl (fsynced) before each write. A row with a recording picked by hand
+    (`mbid_override`) also gets it in the file's recording tag, even when its year holds, and what is keyed by the
+    song's MBID follows it (identity.rekey)."""
+    from . import identity
     done, skipped, dirs = [], [], set()
     with locked():
         rep = load_report()
-        todo = [r for r in rep["rows"] if r["decision"] == "accepted" and r["proposed"] and not r.get("applied")]
+        todo = [r for r in rep["rows"] if r["decision"] == "accepted" and (r["proposed"] or r.get("mbid_override"))
+                and not r.get("applied")]
         live = [r for r in todo if (musicdb.MUSIC / r["file"]).exists()]
         skipped += [{"id": r["id"], "file": r["file"], "why": "file gone"} for r in todo if r not in live]
         hashes = audio_hashes([r["file"] for r in live])
@@ -663,13 +728,31 @@ def apply(_a=None):
             if cur != r["current"]:
                 skipped.append({"id": r["id"], "file": r["file"], "why": "date tags changed since the report"})
                 continue
-            new = {k: r["proposed"].get(k) for k in FIELDS}
-            append_backup({"ts": now(), "kind": "apply", "row": r["id"], "file": r["file"], "md5": r["md5"],
-                           "old": cur, "new": new})
-            write_dates(path, new)
+            new = {k: r["proposed"].get(k) for k in FIELDS} if r["proposed"] else dict(cur)
+            entry = {"ts": now(), "kind": "apply", "row": r["id"], "file": r["file"], "md5": r["md5"], "old": cur,
+                     "new": new}
+            recording, old_rec = KEEP, None
+            if want := r.get("mbid_override"):
+                old_rec = read_recording(path)
+                if "file_mbid" in r and old_rec != r["file_mbid"]:
+                    skipped.append({"id": r["id"], "file": r["file"], "why": "recording tag changed since the report"})
+                    continue
+                if old_rec != want:
+                    if why := recording_untaggable(path):
+                        skipped.append({"id": r["id"], "file": r["file"], "why": f"recording tag not written: {why}"})
+                        continue
+                    recording = want
+                    entry.update(old_recording=old_rec, new_recording=want)
+            if new != cur or recording is not KEEP:
+                append_backup(entry)
+                write_dates(path, new, recording)
+                dirs.add(os.path.dirname(r["file"]))
+            out = {"id": r["id"], "file": r["file"], "new": new}
+            if recording is not KEEP:  # after the write: the keys follow what the file says now
+                out["recording"] = {"old": old_rec, "new": want,
+                                    "rekeyed": identity.rekey(r["file"], old_rec, want, sharing(r["file"], old_rec))}
             r["applied"] = now()
-            done.append({"id": r["id"], "file": r["file"], "new": new})
-            dirs.add(os.path.dirname(r["file"]))
+            done.append(out)
         save_report(rep)
     if dirs:
         mpc_update(dirs)
@@ -678,7 +761,9 @@ def apply(_a=None):
 
 def rollback(ids=None):
     """Put back the old values of the newest apply of each file not rolled back yet (only rows `ids` when given),
-    when the file still has what that apply wrote."""
+    when the file still has what that apply wrote (its recording tag too: the old one is put back, or removed when
+    the file had none)."""
+    from . import identity
     entries = musicdb.jsonl(backup_path())
     stacks = {}
     for e in entries:
@@ -702,9 +787,21 @@ def rollback(ids=None):
             if cur != e["new"]:
                 skipped.append({"id": e["row"], "file": f, "why": "date tags changed since the apply"})
                 continue
-            append_backup({"ts": now(), "kind": "rollback", "row": e["row"], "file": f, "old": e["new"], "new": e["old"]})
-            write_dates(path, e["old"])
-            done.append({"id": e["row"], "file": f, "restored": e["old"]})
+            back, recording = {"ts": now(), "kind": "rollback", "row": e["row"], "file": f, "old": e["new"],
+                               "new": e["old"]}, KEEP
+            if "new_recording" in e:
+                if read_recording(path) != e["new_recording"]:
+                    skipped.append({"id": e["row"], "file": f, "why": "recording tag changed since the apply"})
+                    continue
+                recording = e["old_recording"]  # None: the file had none, the tag goes
+                back.update(old_recording=e["new_recording"], new_recording=recording)
+            append_backup(back)
+            write_dates(path, e["old"], recording)
+            out = {"id": e["row"], "file": f, "restored": e["old"]}
+            if recording is not KEEP:
+                out["recording"] = {"old": e["new_recording"], "new": recording, "rekeyed": identity.rekey(
+                    f, e["new_recording"], recording, sharing(f, e["new_recording"]))}
+            done.append(out)
             dirs.add(os.path.dirname(f))
             if (r := by.get(e["row"])) and r["file"] == f:
                 r.update(applied=None, decision="undecided", decided=None, rolled_back=now())
