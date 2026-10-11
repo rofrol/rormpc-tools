@@ -43,7 +43,10 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
       Decided by the user 2026-10-11 (d-g7ttw73b): the flag now, the alignment with the transcription. rormpc
       already has the manual nudge keys (5ff3403), which write the song's `[offset:]` tag.
 - [ ] AGENTS.md: this repository has its own coordinator, so replace the paragraph that names todo-rormpc as the [t-qwdp2q7k]
-      owner, and describe the cross-repository messages and "landed <tag>" (above).
+      owner, and describe the cross-repository messages and "landed <tag>" (above). Also: `herdr todo run` refuses
+      this repository ("the repository has no master commit"; its branch is `main`, herdr report r-12), so describe
+      the flow that works here (`herdr worker start --base <main sha>`, `herdr worker verify`, cherry-pick onto
+      `main`) until herdr supports `main`.
 
 ## Proposed
 
