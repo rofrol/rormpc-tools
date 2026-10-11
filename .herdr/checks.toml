@@ -1,0 +1,9 @@
+# Checks `herdr todo run --check NAME...` may run to verify a worker's commit:
+# each name maps to a program and its arguments, run as they are in the
+# worker's folder (no shell, so nothing is expanded or split). herdr reads this
+# file from the shared checkout at preflight and keeps the argv with the run.
+# No [install]: a release is a version bump, a tag and rormpc's
+# `rormpc_install.sh companions`, done by the coordinator.
+
+[checks]
+tests = ["uv", "run", "pytest", "-q"]

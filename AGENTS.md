@@ -21,3 +21,12 @@
 - Stop a scratch `mpd-player` by this checkout's path (`pkill -f <worktree>/.venv/bin/mpd-player`) or its pid,
   never `pkill -f mpd-player` or `bin/mpd-player`: that also matches the user's launchd daemon (killed that way
   on 2026-10-07; launchd restarted it).
+
+## Coordination
+
+- rormpc's TODO coordinator owns this repository's TODO, workers and releases. It runs each item through
+  `herdr todo run` with `--check tests` (`.herdr/checks.toml`: `uv run pytest -q`).
+- `herdr todo run` takes only a lowercase conventional commit subject: the type is one of `feat`, `fix`, `docs`,
+  `refactor`, `test`, `chore`, `perf`, `build`, `ci`, `style`, `revert`, the description does not start with a
+  capital. The area goes in the scope: `feat(hits): …`, `fix(player): …`, `chore(tools): 0.2.54 (AI-assisted)`;
+  `hits: …` is refused.
