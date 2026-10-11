@@ -37,6 +37,11 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
         worker without one reports it and never signs up.
       Stored as <song>.transcript.json, never as .lrc. Tell todo-rormpc "landed <tag>": rormpc's display of
       transcripts waits on it.
+      Slices (coordinator 2026-10-12, by the plan's build order): 1. `transcribe.py`, the inline-dependency backend
+      script, the sidecar and offline tests with a fake backend (worker w213, in progress); 2. the evaluation set
+      and threshold calibration (needs the model downloads and library copies, outside the worker sandbox); 3. the
+      radio auto-run and the overnight library batch; 4. the commercial API upper bound (the user's key); 5. Linux
+      faster-whisper. rormpc's display and Enter-to-transcribe are rormpc's items.
 - [ ] Lyrics timed for another cut (moved from rormpc's TODO t-7cqbsitp; MONTERO by Lil Nas X). [t-fb4wapwk]
       - Flag a suspicious LRCLIB entry, one whose last line is far before the file's end. The round of 2026-10-11
         proposed thresholds: Sol, more than 30 s and more than 20% of the file; MiMo, a line span below 0.72 of the
