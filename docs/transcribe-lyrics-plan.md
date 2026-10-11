@@ -1,6 +1,10 @@
 # Transcribed lyrics: measurement and plan
 
-Status: plan only (2026-10-11), nothing built. The open choices at the end need the user's answers before stage 1.
+Status: build order step 2 built (2026-10-12): `musicdb lyrics transcribe` (`transcribe.py`), the macOS backend
+script `src/rormpc_tools/data/transcribe_backend.py` (not yet run on real audio) and offline tests. The VAD and
+withheld-check thresholds are provisional constants in `transcribe.py` until the evaluation set (step 1) calibrates
+them. The user decided the open choices on 2026-10-11 (below, "Decisions"); where they differ from the design text,
+the decisions win.
 
 ## Goal
 
@@ -64,7 +68,7 @@ Findings:
 - **Separation helps when the language is right**: Polish 0.19 → 0.05 (turbo), English 0.29 → 0.23 (large-v3);
   turbo English did not change. It is also what makes VAD and language detection usable (below).
 - **turbo vs large-v3**: no consistent winner (English 0.28 vs 0.23, Polish 0.05 vs 0.07), large-v3 takes about 1.5×
-  as long, and large-v3 has its own hallucinations. turbo is the default.
+  as long, and large-v3 has its own hallucinations. The plan proposed turbo; the user chose large-v3 (Decisions).
 - **whisper.cpp is worse here** (WER 0.37-0.39 English, sync off on vocals), and its VAD merges the vocals into
   ~30 s segments whose starts move (first line 32.6 s instead of 11.6 s): unusable for `.lrc`. VAD on the full
   mix drops almost all singing.
@@ -99,7 +103,7 @@ Pipeline per song:
 4. Language: the stored override (`musicdb lyrics lang FILE CODE`) first; else a majority vote of Whisper's
    language detection over several 30 s windows that start at VAD speech regions of the vocal stem. Always the
    `transcribe` task, never `translate`.
-5. Whisper turbo on the vocal stem (macOS: mlx-whisper; Linux: faster-whisper), `condition_on_previous_text=False`,
+5. Whisper large-v3 on the vocal stem (macOS: mlx-whisper; Linux: faster-whisper), `condition_on_previous_text=False`,
    word timestamps, `hallucination_silence_threshold`; on faster-whisper also `hotwords` from the artist and title
    (for names like "Omarchy").
 6. Checks that mark a transcript `withheld` (kept, not shown by default): words outside VAD speech regions, a line
@@ -151,8 +155,8 @@ base tools. The command checks the environment and says how to install it when i
 | decode | ffmpeg (Homebrew) | ffmpeg (distribution package) |
 | separation | demucs 4.0.1 + torch 2.5.x, CPU (MPS fails, see above) | demucs + torch CPU wheels; CUDA when present |
 | VAD | Silero VAD (the `silero-vad` package, ONNX or torch) | the same |
-| ASR | mlx-whisper, `mlx-community/whisper-large-v3-turbo` (about 1.6 GB, already cached on the user's Mac) | faster-whisper (CTranslate2) with `large-v3-turbo`, CPU int8 or CUDA |
-| models on disk | htdemucs about 80 MB, Whisper turbo 1.6 GB, Silero 2 MB | the same, Whisper in CTranslate2 format |
+| ASR | mlx-whisper, `mlx-community/whisper-large-v3` (about 3 GB) | faster-whisper (CTranslate2) with `large-v3`, CPU int8 or CUDA |
+| models on disk | htdemucs about 80 MB, Whisper large-v3 about 3 GB, Silero 2 MB | the same, Whisper in CTranslate2 format |
 
 The two ASR backends do not decode identically: both get the same fixture songs in tests (offline: a short
 synthetic or public-domain clip, no library files), and the sidecar records the backend so results are not mixed
@@ -194,14 +198,23 @@ Disagreed:
   would keep it always, since the gains and the VAD gate depend on it. The plan keeps it for batch and the
   instrumental gate, and asks the user whether `--current` may skip it (open choice).
 - Model: MiMo proposed large-v3 for batch and turbo on request; the measurements do not support it (Polish 0.05 vs
-  0.07, English 0.28 vs 0.23, large-v3 hallucinates too), so turbo stays the default with large-v3 as an option.
+  0.07, English 0.28 vs 0.23, large-v3 hallucinates too), so the plan kept turbo as the default; the user chose large-v3 (Decisions).
 - States: Sol warned that "no speech" is not "instrumental"; adopted as `no_vocals`. MiMo added a ratio/duration
   gate rather than "any speech", a resumable cache keyed on the audio identity, a precise hash definition,
   multi-window language voting instead of the first-vocal window, and `hotwords` for rare names. All adopted.
 - MiMo suggested measuring one commercial API on the same songs as an upper bound; not planned (it sends the audio
   out), listed as an open choice.
 
-## Open choices
+## Decisions (the user, 2026-10-11)
+
+- New Omarchy Radio downloads are transcribed automatically; the library's songs without lyrics once, overnight.
+- Vocals are always separated (demucs); there is no fast mode on the mix.
+- A transcript that passed the checks is shown at once (state `shown`), labelled machine-transcribed.
+- Model: Whisper large-v3 (`mlx-community/whisper-large-v3` on macOS), not the measured turbo.
+- The heavy dependencies live in a script with inline dependencies (PEP 723) run through `uv run --script`.
+- One commercial API is tried on the whole evaluation set as an upper bound (needs the user's API key).
+
+## Open choices (as asked before the decisions)
 
 Transcribe new Omarchy Radio downloads automatically, or only on request?
 Options: on request and by `--playlist` batch | automatically after each radio download | never in batch

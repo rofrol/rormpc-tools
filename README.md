@@ -9,7 +9,7 @@ They work from the shell too; each one's usage is in its `--help`.
 | `musicdb` | play history (ListenBrainz, MPD log, Takeout, Spotify export) -> MPD stickers `plays`, `lastPlayed`, `skips` and mpd-player's shuffle weights; likes to ListenBrainz; `delete` / `undo` behind rormpc's Ctrl-x / Ctrl-y, `restore` behind its Deleted overlay; `ban` / `unban` / `ban --undo` / `banned --json`: never play or filter in a song again, the file and ListenBrainz kept (`banned.jsonl`; `hits` and mpd-player leave banned songs out) |
 | `musicdb years` | the songs' original release years from MusicBrainz (TDOR, the year the views show; TDRC stays the recording's own first release): `--dry-run` writes `years-report.json` / `.md` to data_dir, every row reviewed (`--accept` / `--reject` ids, `--mbid ROW MBID` for a file without a work link, written to the file's recording tag at apply, its `mb:` song keys following), `--apply` writes the accepted rows, `--rollback` undoes; files without a recording MBID are class `no-recording`; `--json` for rormpc |
 | `musicdb chart` | a standalone HTML page: my top 10 of each listening year as an animated bar chart race (the weighted shuffle's own picks left out), how my most played songs rose and fell (top 10 ranks, top 100 shares), which source the plays come from |
-| `musicdb lyrics` | lyrics from LRCLIB into `lyrics_dir` (`.lrc` synced, `.txt` plain) for rormpc's Lyrics pane; `candidates` / `use` pick another entry; `translate` takes one song's Polish translation from tekstowo.pl on request (personal use: one song per call, cached in `<song>.pl.json`, never committed anywhere), or when it has none a literal line-by-line machine translation by Claude through the Claude Code CLI (`claude -p` with its own login, no API key; the lyrics go to Anthropic; model: `translate_model`), `lang` overrides the detected language |
+| `musicdb lyrics` | lyrics from LRCLIB into `lyrics_dir` (`.lrc` synced, `.txt` plain) for rormpc's Lyrics pane; `candidates` / `use` pick another entry; `translate` takes one song's Polish translation from tekstowo.pl on request (personal use: one song per call, cached in `<song>.pl.json`, never committed anywhere), or when it has none a literal line-by-line machine translation by Claude through the Claude Code CLI (`claude -p` with its own login, no API key; the lyrics go to Anthropic; model: `translate_model`), `lang` overrides the detected language; `transcribe` writes a Whisper large-v3 transcript of songs without lyrics (LRCLIB state none/untagged or not checked, never one with lyrics) to `<song>.transcript.json`, labelled machine-transcribed, never `.lrc`/`.txt` or `index.json` (see [Transcribed lyrics](#transcribed-lyrics-optional)) |
 | `mpd-player` | the playback daemon (runs with rormpc closed): silence between songs, Up next, weighted shuffle by plays and likes with "heard enough" cooldowns and rounds (kept per source.json `source_id` across filter changes; a song is heard after a play that would count as a listen by the scrobbler's listen rule, read from its config.toml), pause for a while (plays on at a wall-clock deadline unless anyone did anything meanwhile); commands over MPD messages on channel `rormpc`, see its `--help`; media keys and scripts send next, prev, toggle, ... to its [command socket](#mpd-players-command-socket); MPD in macOS's Now Playing (`mpd-player nowplaying`) and as the Linux MPRIS player, [with the same commands](#now-playing-macos-and-mpris-linux) |
 | `yt-mp3-mb` | YouTube -> mp3 identified on MusicBrainz, tagged, cover embedded; `--batch --json` for programs: no questions, uncertain matches left for review, a rerun skips what the target dir has |
 | `liveplaylist` | a public YouTube playlist or [Omarchy Radio](https://radio.omarchy.org/) as a "live" MPD playlist (rormpc's Live playlists pane): `add URL`, `check` for new tracks (Omarchy Radio also once a day: rormpc's `companions` run `check --kind omarchy --notify`, which only adds them as pending and notifies), `accept` / `reject` them, `download`, `list`, `rename` its MPD playlist; every command takes `--json` |
@@ -126,6 +126,25 @@ playlists. It is off until you set it up once (`yt-playlist --help` has the deta
    music playlists to clean up.
 
 A "Testing" app's login expires after 7 days; the next run from a terminal logs in again.
+
+### Transcribed lyrics (optional)
+
+`musicdb lyrics transcribe FILE ... | --current | --playlist NAME` transcribes songs that have no lyrics: demucs
+separates the vocals (CPU, about 2 minutes a song), Silero VAD finds the singing (too little: state `no_vocals`),
+Whisper large-v3 writes the words with their times. A transcript that passes the checks is `shown`, one that does
+not is `withheld` with its reasons (words outside the singing, one line looping, a subtitle credit, too few or too
+many words); the plan is [docs/transcribe-lyrics-plan.md](docs/transcribe-lyrics-plan.md). A song transcribed
+before is skipped while its audio is the same; `--force` transcribes it again.
+
+torch, demucs, Silero VAD and mlx-whisper stay out of rormpc-tools' environment: they belong to
+`src/rormpc_tools/data/transcribe_backend.py`, a script with inline dependencies that the command runs through
+`uv run --script`. Set it up once (needs [uv](https://docs.astral.sh/uv/) and `ffmpeg`; downloads about 3 GB of
+packages and models):
+
+    musicdb lyrics transcribe --install
+
+Without uv or that environment the command says so and exits 1. macOS on Apple Silicon only for now; Linux
+(faster-whisper) is planned.
 
 ## Dependencies
 

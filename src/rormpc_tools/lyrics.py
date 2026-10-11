@@ -8,6 +8,7 @@
   musicdb lyrics status [--json]        # counts, or every song's state
   musicdb lyrics translate FILE|--current   # its Polish translation from tekstowo.pl (one song, on request)
   musicdb lyrics lang FILE CODE|auto    # override the detected language of a song's lyrics (pl: no translation)
+  musicdb lyrics transcribe FILE ...|--current|--playlist NAME   # Whisper transcript of songs without lyrics
 
 Files: <lyrics_dir>/<song path>.lrc for synced lyrics (rmpc: lyrics_dir in its config, same directory),
 <song path>.txt for plain lyrics without timestamps. <lyrics_dir>/index.json records per song: synced, plain,
@@ -15,6 +16,7 @@ instrumental, none (LRCLIB has nothing within 2 s of the file's length) or untag
 was checked, so a miss is not asked again until --recheck. LRCLIB matches on duration (about 2 s), so YouTube rips
 with intros or outros often miss; `candidates` + `use` pick another entry by hand.
 Translations: <song path>.pl.json beside the lyrics, outside index.json (see translation.py).
+Transcripts: <song path>.transcript.json beside the lyrics, outside index.json, never .lrc/.txt (see transcribe.py).
 """
 import argparse, datetime as dt, json, subprocess, sys, urllib.parse
 
@@ -183,6 +185,11 @@ def cmd_lang(a):
     print(f"lyrics language: {rec['original_lang']}" + (" (set by hand)" if rec["original_lang_manual"] else ""))
 
 
+def cmd_transcribe(a):
+    from . import transcribe
+    transcribe.cmd(a)
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="musicdb lyrics", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
@@ -195,5 +202,8 @@ def main(argv):
     p = sp.add_parser("translate"); p.add_argument("file", nargs="?"); p.add_argument("--current", action="store_true")
     p.set_defaults(fn=cmd_translate)
     p = sp.add_parser("lang"); p.add_argument("file"); p.add_argument("code"); p.set_defaults(fn=cmd_lang)
+    p = sp.add_parser("transcribe"); p.add_argument("files", nargs="*"); p.add_argument("--current", action="store_true")
+    p.add_argument("--playlist"); p.add_argument("--force", action="store_true")
+    p.add_argument("--install", action="store_true"); p.set_defaults(fn=cmd_transcribe)
     a = ap.parse_args(argv)
     a.fn(a)
