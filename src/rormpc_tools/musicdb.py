@@ -558,18 +558,37 @@ def event_file(lib, files, src, ytid, mbid, artist, title, extra, uri=None):
     return match(lib, None, None, artist, title)[0]
 
 
-def counted(c, lib, stamps=None):
+def event_sig(src, ytid, mbid, uri, artist, title, extra):
+    """What event_file reads of an event (the extra field only for the scrobbler's local log, which names the file
+    there; elsewhere it holds per-listen ids): events with the same signature map to the same file."""
+    return (src, ytid, mbid, uri, artist, title, extra if src == "local" else None)
+
+
+def counted(c, lib, stamps=None, memo=None):
     """{file: (count, last_ts)}, {file: favorite}, unmatched play keys, unmatched favorites. With `stamps` (a dict),
-    it also gets each file's play timestamps."""
+    it also gets each file's play timestamps. With `memo` (a dict {event_sig: file or None}), an event's file is
+    taken from it and what event_file finds is added to it: valid only for the same library, aliases, identity
+    registry and version decisions, which the caller keys it by."""
     plays, last, unmatched = collections.Counter(), {}, collections.Counter()
-    files = library_files(lib)
-    prepare(lib, files)
+    files = None
+    if memo is None:
+        files = library_files(lib)
+        prepare(lib, files)
     local = {ts for (ts,) in c.execute("SELECT ts FROM events WHERE source = 'local'")}
     for src, ts, ytid, mbid, uri, artist, title, extra in c.execute(
             "SELECT source, ts, ytid, mbid, spotify_uri, artist, title, extra FROM events"):
         if src == "lb" and ts in local:
             continue  # the scrobbler's own listen, already counted from its local log
-        f = event_file(lib, files, src, ytid, mbid, artist, title, extra, uri)
+        if memo is None:
+            f = event_file(lib, files, src, ytid, mbid, artist, title, extra, uri)
+        else:
+            sig = event_sig(src, ytid, mbid, uri, artist, title, extra)
+            f = memo.get(sig, memo)  # the memo itself marks "not there": a file is a str or None
+            if f is memo:
+                if files is None:  # the aliases and version decisions only when an event is new to the memo
+                    files = library_files(lib)
+                    prepare(lib, files)
+                f = memo[sig] = event_file(lib, files, src, ytid, mbid, artist, title, extra, uri)
         if src == "yt" and not f:
             continue  # plain YouTube watches that are not in the library are mostly not music
         if f:

@@ -616,17 +616,91 @@ def chart_years_for(rules, years):
     return list(range(FIRST_YEAR, dt.date.today().year))
 
 
+def file_stats(paths):
+    """[path, mtime, size] of each file, None for a missing one: what a cache key reads of the files it follows."""
+    stats = []
+    for p in paths:
+        try:
+            st = p.stat()
+            stats.append([str(p), st.st_mtime_ns, st.st_size])
+        except FileNotFoundError:
+            stats.append([str(p), None, None])
+    return stats
+
+
+def write_cache(path, data):
+    """Write a cache file atomically, under a temp name of its own: two runs at once never read a half-written
+    file or share a temp file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=path.name, suffix=".tmp", delete=False) as fh:
+        fh.write(json.dumps(data))  # json.dump to a file encodes in Python, several times slower
+    os.replace(fh.name, path)
+
+
+def read_cache(path, key):
+    """A cache file's content when it was written under `key`, else None (missing, corrupt, another key)."""
+    try:
+        saved = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return saved if isinstance(saved, dict) and saved.get("key") == key else None
+
+
+CHART_MATCHES_VERSION = 1  # bump when what a chart match holds or how it is computed changes
+CHART_MATCHES_KEPT = 32  # lists of years whose matches are kept (decades, all years, the ranges computed lately)
+
+
+def chart_matches_key(years, lib_key):
+    """What the chart matches of `years` are computed from: the chart pages, the library part of the index (MPD's
+    songs, the path logs) and the MusicBrainz matches cached so far (rows are only ever added: the table's last
+    rowid moves with each one)."""
+    last_mb = cache_db().execute("SELECT max(rowid) FROM mb").fetchone()[0]
+    pages = file_stats([CACHE / f"chart-{y}.json" for y in years])
+    return hashlib.sha256(json.dumps([CHART_MATCHES_VERSION, MATCH_VERSION, years, pages, lib_key,
+                                      last_mb]).encode()).hexdigest()
+
+
+def chart_matches(years, lib, lib_key=None):
+    """The chart entries of `years` (entries(), each with its MusicBrainz match) matched to the library:
+    [(entry, library file or None, candidate key, hide_key, song_order)]. Normalising ~2000 names and matching
+    them took most of a warm run: with the library index on (`lib_key`), they are kept per list of years under
+    `chart_matches_key`. What changes without a new key (hidden songs, ListenBrainz listens, the candidates) is
+    applied by every run itself."""
+    def compute():
+        out = []
+        for s in entries(years).values():
+            s.update(mb_song(s["title"], s["artist"], s["year"]))
+            f, _ = musicdb.match(lib, None, s.get("mbid"), s["artist"], s["title"], any_copy=True)
+            out.append([s, f, f or "chart:" + musicdb.name_key(s["artist"], s["title"]),
+                        hide_key(s["artist"], s["title"]), list(song_order(s))])
+        return out
+    folder = chart_cache_dir()
+    if lib_key is None or folder is None:
+        return compute()
+    years = list(years)
+    # the key before the reads: a chart page or a match added during them is read again by the next run
+    key = chart_matches_key(years, lib_key)
+    path = folder / (hashlib.sha256(json.dumps(years).encode()).hexdigest()[:16] + ".json")
+    saved = read_cache(path, key)
+    if saved and isinstance(saved.get("rows"), list) and all(isinstance(x, list) and len(x) == 5
+                                                             for x in saved["rows"]):
+        return saved["rows"]
+    rows = compute()
+    write_cache(path, {"key": key, "rows": rows})
+    kept = sorted(file_stats(folder.glob("*.json")), key=lambda x: x[1] or 0)  # another run may delete one meanwhile
+    for p, *_ in kept[:-CHART_MATCHES_KEPT]:
+        pathlib.Path(p).unlink(missing_ok=True)
+    return rows
+
+
 def chart_candidates(cands, members, years, a, lib, plays):
     """Add the Billboard rows of the chart years: merged into the library song they match (the chart's artist and
     title shown, as in the chart), else a missing row "chart:<name key>". Hidden chart songs are marked."""
     r, hidden = a.rules, hidden_set()
     chart = []
-    for s in entries(chart_years_for(r, years)).values():
-        s.update(mb_song(s["title"], s["artist"], s["year"]))
-        f, _ = musicdb.match(lib, None, s.get("mbid"), s["artist"], s["title"], any_copy=True)
+    for s, f, key, hide, order in chart_matches(chart_years_for(r, years), lib, getattr(a, "index_key", None)):
         c = cands.get(f) if f else None
         if c is None:
-            key = f or "chart:" + musicdb.name_key(s["artist"], s["title"])
             first = (s.get("first") or "")[:4]
             c = cands.setdefault(key, {"key": key, "file": f, "release": int(first) if first.isdigit() else 0,
                                        "chart_years": [], "plays": plays.get(f, 0) if f else 0, "liked": False,
@@ -636,8 +710,8 @@ def chart_candidates(cands, members, years, a, lib, plays):
                  artist_mbid=c.get("artist_mbid") or s.get("artist_mbid"), tags=s.get("tags") or c.get("tags") or [],
                  chart_years=sorted(set(c["chart_years"]) | set(s["years"])), peak=max(c.get("peak", 0), s["peak"]),
                  points=c.get("points", 0) + s["points"], best=min(c.get("best", 101), s["best"]))
-        c["order"] = song_order(c)
-        c["hidden"] = hide_key(c["artist"], c["title"]) in hidden
+        c["order"] = tuple(order)  # song_order(c): c has the chart's artist and title now
+        c["hidden"] = hide in hidden
         if "billboard" in members:
             members["billboard"].add(c["key"])
         chart.append(c)
@@ -665,15 +739,8 @@ def split_key(lib):
     A change to any of them gives another key."""
     paths = [musicdb.DB, pathlib.Path(f"{musicdb.DB}-wal"), musicdb.auto_log(), musicdb.DATA / "aliases.jsonl",
              musicdb.DATA / "songs.jsonl", musicdb.DATA / "versions.jsonl"]
-    stats = []
-    for p in paths:
-        try:
-            st = p.stat()
-            stats.append([str(p), st.st_mtime_ns, st.st_size])
-        except FileNotFoundError:
-            stats.append([str(p), None, None])
     files = sorted(musicdb.library_files(lib)) if lib else []
-    return hashlib.sha256(json.dumps([SPLIT_VERSION, stats, files]).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([SPLIT_VERSION, file_stats(paths), files]).encode()).hexdigest()
 
 
 def shuffle_split(a, lib):
@@ -690,8 +757,11 @@ def shuffle_split(a, lib):
         if saved.get("key") == key:
             a.own_plays, a.shuffle_picks = saved["own"], collections.Counter(saved["picked"])
             return a.own_plays, a.shuffle_picks
-        stamps = {}
-        musicdb.counted(musicdb.db(), lib, stamps)
+        stamps, memo = {}, getattr(a, "event_memo", None)
+        if memo is None:
+            musicdb.counted(musicdb.db(), lib, stamps)
+        else:  # the library index's memo: only events of a new kind are matched to their file
+            musicdb.counted(musicdb.db(), lib, stamps, memo=memo)
         auto, own, picked = musicdb.auto_starts(), {}, collections.Counter()
         for f, ts_list in stamps.items():
             picks = auto.get(f, [])
@@ -701,45 +771,54 @@ def shuffle_split(a, lib):
                 else:
                     own.setdefault(f, []).append(t)
         a.own_plays, a.shuffle_picks = own, picked
-        # atomic, and a name of its own: two runs at once never read a half-written split or share a temp file
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=path.name, suffix=".tmp", delete=False) as fh:
-            json.dump({"key": key, "own": own, "picked": picked}, fh)
-        os.replace(fh.name, path)
+        write_cache(path, {"key": key, "own": own, "picked": picked})
     return a.own_plays, a.shuffle_picks
 
 
-INDEX_VERSION = 1  # bump when what the library index holds changes: an index of the old format is rebuilt
+INDEX_VERSION = 2  # bump when what the library index holds changes: an index of the old format is rebuilt
 
 
 def index_cache():
     return CACHE / "library-index.json"
 
 
+def plays_cache():
+    """The play counts' own cache next to the index (none when the index is off)."""
+    path = index_cache()
+    return path and path.with_name("library-plays.json")
+
+
+def chart_cache_dir():
+    """The chart matches' cache next to the index (none when the index is off)."""
+    path = index_cache()
+    return path and path.with_name("chart-matches")
+
+
 def index_key(db_update):
-    """What the library index is read from: MPD's database (its `db_update`, and which MPD), the play DB (and its
-    WAL), the path logs counted() maps plays through (aliases, identity registry, version decisions), the deletion
-    journal and the banned songs. A change to any of them gives another key. Likes, exceptions and hidden songs are
-    not in the index: every run reads them itself."""
-    paths = [musicdb.DB, pathlib.Path(f"{musicdb.DB}-wal"), musicdb.DATA / "aliases.jsonl",
-             musicdb.DATA / "songs.jsonl", musicdb.DATA / "versions.jsonl", musicdb.PENDING, musicdb.DONE,
-             banned.log_path()]
-    stats = []
-    for p in paths:
-        try:
-            st = p.stat()
-            stats.append([str(p), st.st_mtime_ns, st.st_size])
-        except FileNotFoundError:
-            stats.append([str(p), None, None])
+    """What the library part of the index is read from: MPD's database (its `db_update`, and which MPD), the path
+    logs counted() maps plays through (aliases, identity registry, version decisions), the deletion journal and the
+    banned songs. A change to any of them gives another key. The play DB is not in it (a new play would make the
+    next run read every song again): the play counts have a key of their own, `plays_key`. Likes, exceptions and
+    hidden songs are not in the index: every run reads them itself."""
+    paths = [musicdb.DATA / "aliases.jsonl", musicdb.DATA / "songs.jsonl", musicdb.DATA / "versions.jsonl",
+             musicdb.PENDING, musicdb.DONE, banned.log_path()]
     mpd = [os.environ.get("MPD_HOST", "localhost"), os.environ.get("MPD_PORT", "6600"), db_update]
-    return hashlib.sha256(json.dumps([INDEX_VERSION, mpd, stats]).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([INDEX_VERSION, mpd, file_stats(paths)]).encode()).hexdigest()
 
 
-def library_index():
+def plays_key(lib_key):
+    """The play counts' key: the library part's key and the play DB (and its WAL)."""
+    stats = file_stats([musicdb.DB, pathlib.Path(f"{musicdb.DB}-wal")])
+    return hashlib.sha256(json.dumps([INDEX_VERSION, lib_key, stats]).encode()).hexdigest()
+
+
+def library_index(a=None):
     """The library as a run reads it: (musicdb's lib, {file: song} as library_songs gives it, plays, last play).
-    Kept across runs in the cache under `index_key`: a run with the same library and play history reads it
-    instead of asking MPD for every song and matching every play again. A missing, corrupt or old index is
-    rebuilt; likes are read from MPD on every run."""
+    Kept across runs in the cache in two parts: the library (MPD's songs, musicdb's lib maps) under `index_key`,
+    the play counts under `plays_key` with the file each kind of event maps to (`play_counts`), so a new play
+    recounts the plays without asking MPD for every song or matching every play again. A missing, corrupt or old
+    part is rebuilt; likes are read from MPD on every run. With `a`, the run's options get the index's key
+    (a.index_key, for the chart matches) and the event memo (a.event_memo, for the play-history split)."""
     path = index_cache()
     if path is None:  # no index (tests): read everything
         lib = musicdb.library()
@@ -748,28 +827,47 @@ def library_index():
     c = musicdb.mpd()
     # the key before the reads: a library or history that changes during them is read again by the next run
     key = index_key(c.stats().get("db_update"))
+    saved, lib = read_cache(path, key), None
     try:
-        saved = json.loads(path.read_text())
-        if saved.get("key") == key:
+        if saved:
             by_yt, by_mbid, by_name = saved["lib"]
             lib = (by_yt, by_mbid, {k: set(fs) for k, fs in by_name.items()})
-            songs, plays, last = saved["songs"], collections.Counter(saved["plays"]), saved["last"]
+            songs = saved["songs"]
             liked = liked_files(c)
             for f, s in songs.items():
                 s["liked"] = f in liked
-            return lib, songs, plays, last
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        pass
-    lib = musicdb.library()
-    plays, last, *_ = musicdb.counted(musicdb.db(), lib)
-    songs = library_songs()
-    # atomic, and a name of its own: two runs at once never read a half-written index or share a temp file
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=path.name, suffix=".tmp", delete=False) as fh:
-        json.dump({"key": key, "lib": [lib[0], lib[1], {k: sorted(fs) for k, fs in lib[2].items()}],
-                   "songs": songs, "plays": plays, "last": last}, fh)
-    os.replace(fh.name, path)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        lib = None
+    if lib is None:
+        lib = musicdb.library()
+        songs = library_songs()
+        write_cache(path, {"key": key, "lib": [lib[0], lib[1], {k: sorted(fs) for k, fs in lib[2].items()}],
+                           "songs": songs})
+    plays, last, memo = play_counts(lib, key)
+    if a is not None:
+        a.index_key, a.event_memo = key, memo
     return lib, songs, plays, last
+
+
+def play_counts(lib, lib_key):
+    """(plays, last play, event memo) of the library part `lib_key` names. Under `plays_key` the counts are read
+    as they are; after a new play they are counted again through the memo {event_sig: file} kept with them, which
+    holds what matching an event to its file found for this library part (the expensive part of counted()), so
+    only events of a new kind are matched."""
+    path, key = plays_cache(), plays_key(lib_key)
+    try:
+        saved = json.loads(path.read_text())
+        memo = {}
+        if saved.get("lib_key") == lib_key:  # the same library part: what the memo found still holds
+            memo = {tuple(sig): f for *sig, f in saved["memo"] if f is None or isinstance(f, str)}
+        if saved.get("key") == key and isinstance(saved["plays"], dict) and isinstance(saved["last"], dict):
+            return collections.Counter(saved["plays"]), saved["last"], memo
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        memo = {}
+    plays, last, *_ = musicdb.counted(musicdb.db(), lib, memo=memo)
+    write_cache(path, {"key": key, "lib_key": lib_key, "memo": [[*sig, f] for sig, f in memo.items()],
+                       "plays": plays, "last": last})
+    return plays, last, memo
 
 
 def my_plays(cands, a, lib, plays):
@@ -912,7 +1010,7 @@ def _show(a):
     r.list = getattr(a, "open_list", None)  # the open smart list: its exceptions (scope list:ID) apply
     if r.rank == "none" and a.top:
         a.n = 0  # "1-100" with no rank: every row
-    lib, songs, plays, last = library_index()
+    lib, songs, plays, last = library_index(a)
     if getattr(a, "songs", None) is None:
         a.songs = songs
     if a.years:
