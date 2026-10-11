@@ -22,8 +22,9 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
       Built 2026-10-12: f15e775 (apply writes the UFID, rollback restores it, `identity.rekey` moves the `mb:`
       keys), version 0.2.54 in 2a10a4f. Tag v0.2.54 pushed (decided by the user 2026-10-12,
       d-gm4tvmnb), "landed v0.2.54" sent to todo-rormpc.
-- [ ] Media keys: `pause` (key, Now Playing, MPRIS) while "Pause for…" holds the pause cancels the timer and stays [t-jeibd5n3]
+- [x] Media keys: `pause` (key, Now Playing, MPRIS) while "Pause for…" holds the pause cancels the timer and stays [t-jeibd5n3]
       paused. Decided by the user 2026-10-11 (d-h2in7kd6). Code: player/control.py `_pause`.
+      Done 2026-10-12: 716e299 (not released yet).
 - [ ] Transcribed lyrics (moved from rormpc's TODO t-dmpfe6gj). Plan: docs/transcribe-lyrics-plan.md, cd7fe61. [t-jsjs5ngd]
       All seven choices were decided by the user 2026-10-11:
       - transcribe each new Omarchy Radio download automatically;
