@@ -47,6 +47,19 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
         proposed thresholds: Sol, more than 30 s and more than 20% of the file; MiMo, a line span below 0.72 of the
         length, more than 45 s left, or 15% off the other candidates' median span. Flag it for checking, never
         reject it.
+        Decided by the coordinator 2026-10-12 after consult round 20261012-015328-4f97 (Sol, MiMo, DeepSeek; all
+        three dropped the standalone span test: long intros make it false-flag and a uniform shift leaves the span
+        unchanged). Flag reasons, each shown with its numbers:
+        * `past-end`: a non-empty line's timestamp past the file's length + 2 s (all three);
+        * `unordered`: timestamps that decrease in file order, after expanding multi-timestamp lines and applying
+          `[offset:]` (all three);
+        * `ends-early`: tail = length - the last non-empty line's start > clamp(0.20 x length, 25 s, 90 s) (Sol's
+          20%, MiMo's and DeepSeek's absolute cap for long songs, Sol's lower floor for short ones);
+        * supporting only, never a flag alone: with two or more other synced candidates that agree within 5 s,
+          this entry's last line more than max(20 s, 10%) from them (Sol, MiMo).
+        Thresholds are named, provisional constants; the label reads "lyrics end early, check timing". Calibration:
+        the coordinator counts the flags over the library read-only after the build and expects at most about 5%
+        of synced entries; more goes to "Needs a decision" with the numbers.
       - Later, with the transcription: automatic alignment, using Whisper word timestamps on the vocal stem and a
         robust offset fit, refusing when the evidence is weak.
       Decided by the user 2026-10-11 (d-g7ttw73b): the flag now, the alignment with the transcription. rormpc
