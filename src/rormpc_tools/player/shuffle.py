@@ -38,9 +38,13 @@ a new one), else its name. `generation` (rormpc's filter change counter) is read
 across the switch is outside the source's files and never in the round. Songs appended by hand to a Hits source
 (source.json `added`, rormpc's Browse `a`) join its files and the round; one appended after the round was done opens
 it again.
-A song counts as heard in the round only after a scrobble-qualifying play (decided 2026-10-11, "as in scrobble"):
-half of it or LISTEN_MAX_S, whichever is shorter (ro-listenbrainz-mpd's defaults; an unknown length needs
-LISTEN_MAX_S), counted as the time it actually played (pauses do not count, a seek does not restart the count). It is
+A song counts as heard in the round only after a scrobble-qualifying play (decided 2026-10-11, "as in scrobble"),
+by the listen rule in ro-listenbrainz-mpd's config.toml ([submission] listen_fraction, listen_max_seconds,
+listen_uninterrupted; read again when the file changes; a missing file, key or invalid value means the scrobbler's
+default: 0.5, 240, false): the fraction of the song or listen_max_seconds, whichever is shorter (0: no cap; an
+unknown length needs listen_max_seconds, and with 0 never counts), counted as the time it actually played (pauses do
+not count). A seek (MPD's elapsed more than SEEK_TOLERANCE_S away from where playback without one would be) keeps the
+count, or with listen_uninterrupted starts it again from zero, as in the scrobbler. It is
 checked on every wake (MPD's idle events, the MAX_WAIT heartbeat) and when the song stops being current, so a song
 skipped before that stays unheard and can still come in this round; the round does not end while its last unheard
 song is playing.
@@ -64,7 +68,8 @@ heard, total, done}, rounds (auto|manual), ahead_note, active, reason, trail [{i
 (one line per song this shuffle started: {start, file}), read by musicdb; prev.jsonl (each Previous move: {cmd, t, from, from_id,
 to, to_id}, then {cmd, result: confirmed|failed}), read by `musicdb import-skips`.
 """
-import datetime as dt, json, math, os, random, time, uuid
+import datetime as dt, json, math, os, pathlib, random, sys, time, tomllib, uuid
+from typing import NamedTuple
 
 from .. import banned
 from . import MAX_WAIT, Module, log, queue_entry, read_state, state_dir, write_state
@@ -81,9 +86,28 @@ COOLDOWN_DAYS = [1, 3, 7, 14]
 # asking "heard enough" again within this many days after the last cooldown ended grows it
 COOLDOWN_MEMORY_DAYS = 30
 FINISHED_SHARE = 0.8
-# a play counts as heard in a round as it would count as a listen: ro-listenbrainz-mpd's defaults
-# (submission.listen_fraction, submission.listen_max_seconds; its config.rs), the shorter of the two
-LISTEN_FRACTION, LISTEN_MAX_S = 0.5, 240
+
+
+
+class ListenRule(NamedTuple):
+    """When a play counts as a listen, as ro-listenbrainz-mpd's config.rs ListenRule: `fraction` of the song or
+    `max_s` seconds, whichever is shorter (`max_s` None: no cap, and a song of unknown length never counts);
+    `uninterrupted`: a seek starts the count again (a pause does not)."""
+    fraction: float = 0.5
+    max_s: float | None = 240
+    uninterrupted: bool = False
+
+
+# a play counts as heard in a round as it would count as a listen: ro-listenbrainz-mpd's defaults (its config.rs)
+# until its config file says otherwise
+DEFAULT_RULE = ListenRule()
+# where ro-listenbrainz-mpd reads its config (dirs::config_dir()/listenbrainz-mpd/config.toml)
+SCROBBLER_CONFIG = (pathlib.Path.home() / "Library/Application Support" if sys.platform == "darwin" else
+                    pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or pathlib.Path.home() / ".config")) \
+    / "listenbrainz-mpd/config.toml"
+# how far MPD's elapsed may drift from where playback without a seek would put it (the scrobbler's SEEK_TOLERANCE:
+# the latency between MPD's idle event and the status request)
+SEEK_TOLERANCE_S = 2.0
 PLAN_N = 10
 HISTORY_N = 20
 # the plan's MPD priorities: plan[k] gets PLAN_N - k (10..1), below the Up next requests (255, 254, ...), so MPD
@@ -108,9 +132,33 @@ def log_prev(record):
         os.close(fd)
 
 
-def listen_needed(duration):
-    """Seconds a song of `duration` has to play to count as heard (a scrobble-qualifying play)."""
-    return min(LISTEN_FRACTION * duration, LISTEN_MAX_S) if duration else LISTEN_MAX_S
+def read_listen_rule(path):
+    """The [submission] listen rule from ro-listenbrainz-mpd's config at `path`; each key that is missing, of the
+    wrong type or out of range (the scrobbler takes a fraction in (0, 1]) is the scrobbler's default."""
+    try:
+        sub = tomllib.loads(path.read_text()).get("submission")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return DEFAULT_RULE
+    if not isinstance(sub, dict):
+        return DEFAULT_RULE
+    fraction, max_s, uninterrupted = (sub.get(k) for k in
+                                      ("listen_fraction", "listen_max_seconds", "listen_uninterrupted"))
+    rule = DEFAULT_RULE
+    if isinstance(fraction, (int, float)) and not isinstance(fraction, bool) and 0 < fraction <= 1:
+        rule = rule._replace(fraction=float(fraction))
+    if isinstance(max_s, int) and not isinstance(max_s, bool) and max_s >= 0:
+        rule = rule._replace(max_s=max_s or None)
+    if isinstance(uninterrupted, bool):
+        rule = rule._replace(uninterrupted=uninterrupted)
+    return rule
+
+
+def listen_needed(duration, rule=DEFAULT_RULE):
+    """Seconds a song of `duration` has to play to count as heard (a scrobble-qualifying play); inf: never."""
+    if not duration:
+        return math.inf if rule.max_s is None else rule.max_s
+    needed = rule.fraction * duration
+    return needed if rule.max_s is None else min(needed, rule.max_s)
 
 
 def today():
@@ -148,13 +196,14 @@ class Shuffle(Module):
         self.pending_prev = None  # the Previous move being made, until its transition is observed
         self.last_prev = 0.0
         self.current = None  # songid being timed
-        self.playing = None  # {id, file, played, last, running, duration, origin}
+        self.playing = None  # {id, file, played, counted, pos, last, running, duration, origin}
         self.random_seen = None  # MPD's random at the last wake, to notice it being turned off
         self.active = False
         self.reason = ""
         self.rng = rng or random.Random()
         self._weights = (None, {"files": {}, "global_cadence": 14, "generated": 0})
         self._banned = (None, set())
+        self._rule = (None, DEFAULT_RULE)
 
     def update_version(self):
         signature = (self._plan_source, [(e["id"], e["file"], e.get("slot")) for e in self.plan])
@@ -248,6 +297,17 @@ class Shuffle(Module):
         if self._banned[0] != mtime:
             self._banned = (mtime, banned.files() if mtime is not None else set())
         return self._banned[1]
+
+    def listen_rule(self):
+        """ro-listenbrainz-mpd's listen rule (read_listen_rule), read again when its config file changes."""
+        try:
+            st = SCROBBLER_CONFIG.stat()
+            key = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            key = None
+        if self._rule[0] != key:
+            self._rule = (key, read_listen_rule(SCROBBLER_CONFIG) if key is not None else DEFAULT_RULE)
+        return self._rule[1]
 
     def round_members(self):
         """The files of a Hits source's snapshot plus the songs appended to it by hand (`added`), or None (an older
@@ -562,12 +622,21 @@ class Shuffle(Module):
     # ------------------------------------------------------------ watching playback
 
     def tick(self, s, now):
-        """Count the seconds the timed song actually played (pauses, the gap's 0:00 pause and stops don't)."""
+        """Count the seconds the timed song actually played (pauses, the gap's 0:00 pause and stops don't). `counted`
+        is the playtime toward a listen: as `played`, but a seek starts it again under the uninterrupted rule."""
         p = self.playing
         if p:
-            if p["running"]:
-                p["played"] += max(0.0, now - p["last"])
-            p["last"], p["running"] = now, s.get("state") == "play" and s.get("songid") == str(p["id"])
+            delta = max(0.0, now - p["last"]) if p["running"] else 0.0
+            p["played"] += delta
+            p["counted"] += delta
+            same = s.get("songid") == str(p["id"])
+            if same and s.get("state") in ("play", "pause") and s.get("elapsed") is not None:
+                pos = float(s["elapsed"])
+                expected = p["pos"] + (now - p["last"] if p["running"] else 0.0)
+                if abs(pos - expected) > SEEK_TOLERANCE_S and self.listen_rule().uninterrupted:
+                    p["counted"] = 0.0  # the scrobbler counts from the new position
+                p["pos"] = pos
+            p["last"], p["running"] = now, s.get("state") == "play" and same
 
     def outcome(self, p, now):
         """A song stopped being current: finished, early or late skip; a rest and a live outcome follow."""
@@ -586,7 +655,7 @@ class Shuffle(Module):
         """The timed song joins the round's heard once it has played as long as a scrobble needs (listen_needed),
         in the round it started in (not after `shuffle newround` or another source); an off-source song never.
         True when it was added now."""
-        if p.get("heard") or p["played"] < listen_needed(p["duration"]):
+        if p.get("heard") or p["counted"] < listen_needed(p["duration"], self.listen_rule()):
             return False
         p["heard"] = True
         if not self.round or p.get("round") != [self.round.get("source"), self.round.get("number", 1)]:
@@ -654,7 +723,8 @@ class Shuffle(Module):
             self.give_back(gone)
         if self.patch_base is not None and int(s["songid"]) in self.patch_base:
             self.clear_patch()  # classify the played head against the effective order before restoring it
-        self.playing = {"id": int(s["songid"]), "file": file, "played": float(s.get("elapsed", 0) or 0),
+        elapsed = float(s.get("elapsed", 0) or 0)
+        self.playing = {"id": int(s["songid"]), "file": file, "played": elapsed, "counted": elapsed, "pos": elapsed,
                         "last": now, "running": s.get("state") == "play", "origin": origin,
                         "duration": float(s.get("duration", 0) or cur.get("duration", 0) or 0)}
         if self.round:

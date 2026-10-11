@@ -18,6 +18,9 @@ from rormpc_tools import mbtag, musicdb  # noqa: E402
 
 # the macOS listenbrainz-mpd config is not under XDG_CONFIG_HOME: the user's token and api_url must not leak in
 mbtag.LB_CONFIGS = [_root / "config" / "listenbrainz-mpd" / "config.toml"]
+# nor its listen rule: mpd-player's shuffle reads the scrobbler's defaults unless a test writes a config
+from rormpc_tools.player import shuffle as _shuffle  # noqa: E402
+_shuffle.SCROBBLER_CONFIG = _root / "config" / "listenbrainz-mpd" / "config.toml"
 
 
 class FakeMPD:

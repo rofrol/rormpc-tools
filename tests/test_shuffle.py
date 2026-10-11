@@ -85,7 +85,7 @@ def play(d, mpd, file):
     asyncio.run(d.step({"player"}))
 
 
-def listen(d, clock, seconds=shuffle.LISTEN_MAX_S):
+def listen(d, clock, seconds=shuffle.DEFAULT_RULE.max_s):
     """The song playing plays on for `seconds` (long enough to count as heard by default), then MPD wakes us."""
     clock[0] += seconds
     asyncio.run(d.step({"player"}))
