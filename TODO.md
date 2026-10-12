@@ -73,7 +73,7 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
       the flow that works here (`herdr worker start --base <main sha>`, `herdr worker verify`, cherry-pick onto
       `main`) until herdr supports `main`.
       Done 2026-10-12: the AGENTS.md commit after 4d5b907 (docs(agents): ...).
-- [ ] Releases without the auto-mode classifier blocking them (the user's request 2026-10-12: "and so the
+- [ ] Releases without the auto-mode classifier blocking them (the user's request 2026-10-12: "and so the [t-ow65p6fa]
       classifier does not block it; ask the herdr coordinator"). `git tag v0.2.54 && git push origin main v0.2.54`
       was refused as "Create Public Surface" until the user approved it (d-gm4tvmnb). todo-herdr's answer
       (herdr TODO 1d9be089, t-oe3wrkvz): no broad allow rule; instead a reviewed `scripts/release.sh <version>` that
