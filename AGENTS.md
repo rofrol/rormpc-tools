@@ -5,7 +5,10 @@
 - Nothing personal in this public repository: no account names, private paths, tokens or listening data, not in
   defaults, tests, examples or commit messages. Personal values belong in the user's
   `~/.config/rormpc-tools/config.toml`.
-- Release: bump `version` in pyproject.toml, tag `vX.Y.Z`, push the tag, then bump `RORMPC_TOOLS_TAG` in rormpc's
+- Release: bump `version` in pyproject.toml in its own reviewed commit on `main`, then run
+  `scripts/release.sh X.Y.Z`: it refuses unless on a clean `main` that fast-forwards origin/main, the version matches
+  pyproject.toml and the tag is new, gates on `uv run pytest -q`, creates the annotated tag `vX.Y.Z` and pushes only
+  `main` and that tag (never by hand with `git tag`/`git push`). Then bump `RORMPC_TOOLS_TAG` in rormpc's
   `scripts/rormpc_install.sh` and run `rormpc_install.sh companions` there. In the agent Bash tool's shell, `sed` is BSD, not GNU; GNU-style `sed -i 's/…/…/'` is not portable.
   Bump the version with Python and verify the actual change in `git diff` before committing or tagging.
   Gate the tag on the tests
