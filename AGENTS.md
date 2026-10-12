@@ -24,9 +24,25 @@
 
 ## Coordination
 
-- rormpc's TODO coordinator owns this repository's TODO, workers and releases. It runs each item through
-  `herdr todo run` with `--check tests` (`.herdr/checks.toml`: `uv run pytest -q`).
-- `herdr todo run` takes only a lowercase conventional commit subject: the type is one of `feat`, `fix`, `docs`,
-  `refactor`, `test`, `chore`, `perf`, `build`, `ci`, `style`, `revert`, the description does not start with a
-  capital. The area goes in the scope: `feat(hits): …`, `fix(player): …`, `chore(tools): 0.2.54 (AI-assisted)`;
-  `hits: …` is refused.
+- Since 2026-10-12 this repository has its own `TODO.md` and its own coordinator (herdr agent name
+  `todo-rormpc-tools`), decided by the user (d-33kat4ps), following herdr's rule of one coordinator per git
+  repository. rormpc's coordinator (`todo-rormpc`) used to own it; its history of rormpc-tools work is in rormpc's
+  `TODO.md`.
+- Cross-repository work: rormpc's coordinator sends this repository's coordinator a plain message; the receiver
+  decides, queues the item here, and replies "landed <tag>" when it is released. rormpc's consuming item waits in
+  rormpc's `TODO.md` as "Waiting on rormpc-tools". Releases (version bump, tag, push) belong to this repository;
+  rormpc's install script pins the tag (`RORMPC_TOOLS_TAG`, see Release above).
+- `herdr todo run` refuses this repository today ("the repository has no master commit"; the branch is `main`;
+  herdr report r-12, a fix is queued in herdr). Until herdr supports `main`, the coordinator records the base
+  (`git rev-parse main`), starts a headless worker with `herdr worker start --item <t-id> --folder-slot worker
+  --branch todo/<slug> --base <sha> ...`, waits with `herdr worker wait <id> --attention` through herdr-job, then
+  runs `herdr worker stop` and `herdr worker verify <id> --base <sha> --message <subject> --paths <globs>
+  --cmd "uv run pytest -q && uvx pyflakes src"`. It cherry-picks onto `main` only on exit 0 (verified), then runs
+  the tests on `main`. A second slot (`--folder-slot worker2`) runs an independent item in parallel.
+- Headless workers run sandboxed: `uv run`/`uvx` cannot write uv's cache, the unix-socket tests in
+  `tests/test_control.py` and `tests/test_nowplaying.py` fail with PermissionError, and there is no network. The
+  coordinator's verify (outside the sandbox) is the real test run; a worker lists what it could not run.
+- `herdr worker verify --message` and `herdr todo run` take only a lowercase conventional commit subject: the type
+  is one of `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `perf`, `build`, `ci`, `style`, `revert`, the
+  description does not start with a capital. The area goes in the scope: `feat(hits): …`, `fix(player): …`,
+  `chore(tools): 0.2.54 (AI-assisted)`; `hits: …` is refused.
