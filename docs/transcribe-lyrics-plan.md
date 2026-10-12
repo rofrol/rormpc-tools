@@ -175,6 +175,26 @@ silently. Linux speed is unmeasured; on CPU expect several times realtime for Wh
 5. The radio batch (`--playlist`), then optionally the automatic run after a radio download.
 6. The Linux backend (faster-whisper) and its parity test.
 
+### Evaluation run
+
+`musicdb lyrics transcribe-eval LIST [--out DIR | --from DIR] [--json]` (`transcribe_eval.py`) calibrates step 1's
+thresholds. LIST is a text file kept outside the repository, one song per line, `<path relative to the music
+dir><TAB>lyrics|instrumental`: `lyrics` songs have LRCLIB synced lyrics (`<song>.lrc`, the reference), `instrumental`
+ones are labelled by hand. Each song goes through the backend once (`transcribe.run_backend`; the vocal-stem cache
+makes reruns cheap); its raw JSON is kept in DIR (default a new temporary directory, printed), and a rerun with the
+same `--out DIR` reuses it while the model and VAD values are the same. `--from DIR` judges again from those files
+without the backend, so the withheld-check and no_vocals values can be changed in `transcribe.py` and judged again
+in seconds. Nothing is written to the lyrics dir.
+
+The report gives, per song: the state and reasons `transcribe.judge` gives with today's constants; the measures the
+checks compare (share of words outside speech and the smallest `SPEECH_PAD` that would pass it, the top line's
+repeat count and factor, words per second of speech, VAD speech seconds and ratio); for `lyrics` songs WER and sync
+as in "Measurements" above (the sync to the nearest transcript *line* start, the median and the share within 1 s);
+for `instrumental` songs whether they ended `no_vocals`. Then, for each threshold alone (the others at today's
+values), the range of values that keeps its check off every `lyrics` song and catches every `instrumental` song no
+other check catches, or the songs that make it impossible. `VAD_*` and `LANG_WINDOWS` change the backend's output:
+they are compared by rerunning with other constants, not from saved results.
+
 ## Consult round (2026-10-11, GPT-6.1 Sol and MiMo-V2.6-Pro, one round)
 
 Both were given the measurements and the draft design and asked as devil's advocates.

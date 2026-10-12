@@ -135,6 +135,8 @@ Whisper large-v3 writes the words with their times. A transcript that passes the
 not is `withheld` with its reasons (words outside the singing, one line looping, a subtitle credit, too few or too
 many words); the plan is [docs/transcribe-lyrics-plan.md](docs/transcribe-lyrics-plan.md). A song transcribed
 before is skipped while its audio is the same; `--force` transcribes it again.
+`musicdb lyrics transcribe-eval LIST [--out DIR | --from DIR]` measures the checks on labelled songs, never writing
+to the lyrics dir (the plan's "Evaluation run").
 
 torch, demucs, Silero VAD and mlx-whisper stay out of rormpc-tools' environment: they belong to
 `src/rormpc_tools/data/transcribe_backend.py`, a script with inline dependencies that the command runs through

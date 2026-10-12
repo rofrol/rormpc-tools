@@ -10,6 +10,7 @@
   musicdb lyrics translate FILE|--current   # its Polish translation from tekstowo.pl (one song, on request)
   musicdb lyrics lang FILE CODE|auto    # override the detected language of a song's lyrics (pl: no translation)
   musicdb lyrics transcribe FILE ...|--current|--playlist NAME   # Whisper transcript of songs without lyrics
+  musicdb lyrics transcribe-eval LIST [--out DIR | --from DIR] [--json]   # calibrate the transcript checks
 
 Files: <lyrics_dir>/<song path>.lrc for synced lyrics (rmpc: lyrics_dir in its config, same directory),
 <song path>.txt for plain lyrics without timestamps. <lyrics_dir>/index.json records per song: synced, plain,
@@ -240,6 +241,11 @@ def cmd_transcribe(a):
     transcribe.cmd(a)
 
 
+def cmd_transcribe_eval(a):
+    from . import transcribe_eval
+    transcribe_eval.cmd(a)
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="musicdb lyrics", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
@@ -257,5 +263,8 @@ def main(argv):
     p = sp.add_parser("transcribe"); p.add_argument("files", nargs="*"); p.add_argument("--current", action="store_true")
     p.add_argument("--playlist"); p.add_argument("--force", action="store_true")
     p.add_argument("--install", action="store_true"); p.set_defaults(fn=cmd_transcribe)
+    p = sp.add_parser("transcribe-eval"); p.add_argument("list"); g = p.add_mutually_exclusive_group()
+    g.add_argument("--out"); g.add_argument("--from", dest="from_dir"); p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_transcribe_eval)
     a = ap.parse_args(argv)
     a.fn(a)

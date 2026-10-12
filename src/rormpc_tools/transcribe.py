@@ -247,31 +247,39 @@ def make_lines(groups, words):
              "text": "".join(words[i]["word"] for i in g).strip(), "words": [g[0], g[-1]]} for g in groups]
 
 
-def withheld_reasons(lines, words, regions):
-    reasons = []
-    if not words:
-        return reasons
+def measures(lines, words, regions):
+    """What the withheld checks compare with their thresholds (words must not be empty): each word outside speech,
+    their share, the most and next most repeated line's counts, and words per second of speech."""
     outside = [not in_speech(w, regions) for w in words]
-    if sum(outside) / len(words) > OUTSIDE_SPEECH_MAX:
-        reasons.append("words_outside_speech")
     counts = {}
     for line in lines:
         key = norm(line["text"])
         if key:
             counts[key] = counts.get(key, 0) + 1
-    top = sorted(counts.values(), reverse=True) + [0]
-    if top[0] >= REPEAT_MIN and top[0] >= REPEAT_FACTOR * max(top[1], 1):
+    top = sorted(counts.values(), reverse=True) + [0, 0]
+    speech = sum(e - s for s, e in regions)
+    return {"outside": outside, "outside_share": sum(outside) / len(words), "repeat_top": top[0],
+            "repeat_next": top[1], "density": len(words) / speech if speech else float("inf")}
+
+
+def withheld_reasons(lines, words, regions):
+    reasons = []
+    if not words:
+        return reasons
+    m = measures(lines, words, regions)
+    outside = m["outside"]
+    if m["outside_share"] > OUTSIDE_SPEECH_MAX:
+        reasons.append("words_outside_speech")
+    if m["repeat_top"] >= REPEAT_MIN and m["repeat_top"] >= REPEAT_FACTOR * max(m["repeat_next"], 1):
         reasons.append("repeated_line")
     for line in lines:
         a, b = line["words"]
         if CREDIT_LINES.search(line["text"]) and all(outside[a:b + 1]):
             reasons.append("credit_line_outside_speech")
             break
-    speech = sum(e - s for s, e in regions)
-    density = len(words) / speech if speech else float("inf")
-    if density < DENSITY_MIN:
+    if m["density"] < DENSITY_MIN:
         reasons.append("low_word_density")
-    elif density > DENSITY_MAX:
+    elif m["density"] > DENSITY_MAX:
         reasons.append("high_word_density")
     return reasons
 
