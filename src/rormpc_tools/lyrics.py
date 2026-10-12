@@ -6,6 +6,7 @@
   musicdb lyrics candidates FILE        # what LRCLIB has for a song, as JSON (rormpc's "Choose lyrics…")
   musicdb lyrics use FILE ID            # take this LRCLIB entry for the song
   musicdb lyrics status [--json]        # counts, or every song's state
+  musicdb lyrics check [FILE ...] [--dry-run]   # recompute the timing flags of synced lyrics (default: all)
   musicdb lyrics translate FILE|--current   # its Polish translation from tekstowo.pl (one song, on request)
   musicdb lyrics lang FILE CODE|auto    # override the detected language of a song's lyrics (pl: no translation)
   musicdb lyrics transcribe FILE ...|--current|--playlist NAME   # Whisper transcript of songs without lyrics
@@ -15,12 +16,15 @@ Files: <lyrics_dir>/<song path>.lrc for synced lyrics (rmpc: lyrics_dir in its c
 instrumental, none (LRCLIB has nothing within 2 s of the file's length) or untagged, with the LRCLIB id and when it
 was checked, so a miss is not asked again until --recheck. LRCLIB matches on duration (about 2 s), so YouTube rips
 with intros or outros often miss; `candidates` + `use` pick another entry by hand.
+Timing flags (lyrics_check.py): a synced entry whose lines run past the file's end, go back in time or end long
+before the file does is flagged "lyrics end early, check timing" in its record, "suspect": [{"reason", "label",
+numbers}], never rejected: the lyrics are still written and shown. fetch and use set it, check recomputes it.
 Translations: <song path>.pl.json beside the lyrics, outside index.json (see translation.py).
 Transcripts: <song path>.transcript.json beside the lyrics, outside index.json, never .lrc/.txt (see transcribe.py).
 """
 import argparse, datetime as dt, json, subprocess, sys, urllib.parse
 
-from . import mbtag, settings
+from . import lyrics_check, mbtag, settings
 
 LYRICS = settings.LYRICS_DIR
 INDEX = LYRICS / "index.json"
@@ -63,8 +67,16 @@ def paths(rel):
     return base.with_suffix(".lrc"), base.with_suffix(".txt")
 
 
-def write(rel, entry, artist, title, how):
-    """Store one LRCLIB entry for a song; returns the index record."""
+def last_lines(cands, entry, duration):
+    """Last-line starts of the other synced candidates of the same cut (within SLACK of the file's length)."""
+    return [x for c in cands if c.get("syncedLyrics") and c.get("id") != entry.get("id")
+            and (not duration or abs((c.get("duration") or 0) - duration) <= SLACK)
+            and (x := lyrics_check.last_line(c["syncedLyrics"])) is not None]
+
+
+def write(rel, entry, artist, title, how, duration=0, cands=()):
+    """Store one LRCLIB entry for a song; returns the index record. Synced lyrics get their timing flags, with the
+    other candidates (when at hand) as supporting evidence."""
     lrc, txt = paths(rel)
     lrc.parent.mkdir(parents=True, exist_ok=True)
     for p in (lrc, txt):
@@ -78,7 +90,10 @@ def write(rel, entry, artist, title, how):
     if entry.get("syncedLyrics"):
         head = f"[ar:{artist}]\n[ti:{title}]\n[re:lrclib.net #{entry['id']}]\n"
         lrc.write_text(head + entry["syncedLyrics"].rstrip() + "\n")
-        return rec | {"state": "synced"}
+        rec["state"] = "synced"
+        if suspect := lyrics_check.reasons(entry["syncedLyrics"], duration, last_lines(cands, entry, duration)):
+            rec["suspect"] = suspect
+        return rec
     if entry.get("plainLyrics"):
         txt.write_text(entry["plainLyrics"].rstrip() + "\n")
         return rec | {"state": "plain"}
@@ -90,7 +105,8 @@ def fetch_one(m, rel, index):
     if not (artist and title):
         index[rel] = {"state": "untagged", "checked_at": dt.datetime.now().isoformat(timespec="seconds")}
         return index[rel]
-    index[rel] = write(rel, best(search(artist, title), duration), artist, title, "auto")
+    cands = search(artist, title)
+    index[rel] = write(rel, best(cands, duration), artist, title, "auto", duration, cands)
     return index[rel]
 
 
@@ -137,7 +153,9 @@ def cmd_candidates(a):
     out = [{"id": c["id"], "artist": c.get("artistName"), "title": c.get("trackName"), "album": c.get("albumName"),
             "duration": c.get("duration"), "delta": round((c.get("duration") or 0) - duration, 1),
             "synced": bool(c.get("syncedLyrics")), "plain": bool(c.get("plainLyrics")),
-            "instrumental": bool(c.get("instrumental"))} for c in cands]
+            "instrumental": bool(c.get("instrumental")),
+            "suspect": lyrics_check.reasons(c["syncedLyrics"], duration, last_lines(cands, c, duration))
+            if c.get("syncedLyrics") else []} for c in cands]
     out.sort(key=lambda c: (abs(c["delta"]), not c["synced"]))
     print(json.dumps({"file": a.file, "duration": duration, "current": load().get(a.file), "candidates": out},
                      ensure_ascii=False))
@@ -148,11 +166,13 @@ def cmd_use(a):
     entry = mbtag.http(f"{API}/get/{a.id}", host_interval=0.5, attempts=3, timeout=20)
     if not entry:
         sys.exit(f"LRCLIB has no entry {a.id}")
-    artist, title, *_ = song_tags(mpd(), a.file)
+    artist, title, _album, duration = song_tags(mpd(), a.file)
     index = load()
-    index[a.file] = write(a.file, entry, artist, title, "chosen")
+    index[a.file] = write(a.file, entry, artist, title, "chosen", duration)
     save(index)
     print(f"lyrics: {index[a.file]['state']} from LRCLIB #{a.id}")
+    if reasons := lyrics_check.flagged(index[a.file].get("suspect")):
+        print(f"{lyrics_check.LABEL} ({', '.join(reasons)})")
 
 
 def cmd_status(a):
@@ -162,7 +182,37 @@ def cmd_status(a):
     counts = {}
     for rec in index.values():
         counts[rec["state"]] = counts.get(rec["state"], 0) + 1
-    print(f"{LYRICS}: " + ", ".join(f"{n} {s}" for s, n in sorted(counts.items())))
+    suspect = sum(bool(lyrics_check.flagged(rec.get("suspect"))) for rec in index.values())
+    print(f"{LYRICS}: " + ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
+          + (f" ({suspect} synced flagged: {lyrics_check.LABEL})" if suspect else ""))
+
+
+def cmd_check(a):
+    """Recompute the timing flags of existing synced entries from their .lrc and the file's length in MPD (no
+    candidates: no supporting evidence)."""
+    from .musicdb import mpd
+    m, index = mpd(), load()
+    files = a.files or [rel for rel, rec in index.items() if rec.get("state") == "synced"]
+    counts, checked, flagged = {}, 0, 0
+    for rel in files:
+        rec, lrc = index.get(rel), paths(rel)[0]
+        if not rec or rec.get("state") != "synced" or not lrc.exists():
+            print(f"{rel}: no synced lyrics", file=sys.stderr)
+            continue
+        checked += 1
+        suspect = lyrics_check.reasons(lrc.read_text(), song_tags(m, rel)[3])
+        if suspect:
+            rec["suspect"] = suspect
+            flagged += bool(lyrics_check.flagged(suspect))
+            print(f"{', '.join(lyrics_check.flagged(suspect))}: {rel}")
+        else:
+            rec.pop("suspect", None)
+        for reason in lyrics_check.flagged(suspect):
+            counts[reason] = counts.get(reason, 0) + 1
+    if not a.dry_run:
+        save(index)
+    print(f"checked {checked} synced, {flagged} flagged" + "".join(f", {n} {s}" for s, n in sorted(counts.items()))
+          + (" (dry run, index.json unchanged)" if a.dry_run else ""))
 
 
 def cmd_translate(a):
@@ -199,6 +249,8 @@ def main(argv):
     p.set_defaults(fn=cmd_candidates)
     p = sp.add_parser("use"); p.add_argument("file"); p.add_argument("id", type=int); p.set_defaults(fn=cmd_use)
     p = sp.add_parser("status"); p.add_argument("--json", action="store_true"); p.set_defaults(fn=cmd_status)
+    p = sp.add_parser("check"); p.add_argument("files", nargs="*"); p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_check)
     p = sp.add_parser("translate"); p.add_argument("file", nargs="?"); p.add_argument("--current", action="store_true")
     p.set_defaults(fn=cmd_translate)
     p = sp.add_parser("lang"); p.add_argument("file"); p.add_argument("code"); p.set_defaults(fn=cmd_lang)
