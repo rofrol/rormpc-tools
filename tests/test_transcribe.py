@@ -267,7 +267,8 @@ def test_missing_environment_says_how_to_install(monkeypatch):
 def test_backend_script_is_shipped_with_inline_dependencies():
     text = transcribe.BACKEND.read_text()
     assert text.startswith("# /// script") and '"demucs==4.0.1"' in text and '"torch==2.5.1"' in text
-    assert transcribe.MODEL.endswith("whisper-large-v3")
+    assert transcribe.MODEL == "mlx-community/whisper-large-v3-mlx"
+    assert transcribe.label(transcribe.MODEL) == "machine-transcribed by Whisper (large-v3), may be wrong"
     assert os.path.basename(transcribe.BACKEND) == "transcribe_backend.py"
 
 

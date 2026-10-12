@@ -36,7 +36,7 @@ import datetime as dt, hashlib, json, os, pathlib, re, shutil, subprocess, sys, 
 from . import lyrics, settings, translation
 
 BACKEND = pathlib.Path(__file__).with_name("data") / "transcribe_backend.py"
-MODEL = "mlx-community/whisper-large-v3"  # decided by the user 2026-10-11: large-v3, not the measured turbo
+MODEL = "mlx-community/whisper-large-v3-mlx"  # decided by the user 2026-10-11: large-v3, not the measured turbo
 CACHE = settings.XDG_CACHE / "rormpc-tools" / "transcribe" / "vocals"  # vocal stems by audio identity
 RATE = 16000
 QUALIFY = {None, "none", "untagged"}  # LRCLIB states that may be transcribed (None: not checked yet)
@@ -101,7 +101,8 @@ def save(rel, rec):
 
 
 def label(model):
-    return f"machine-transcribed by Whisper ({model.rsplit('/', 1)[-1].removeprefix('whisper-')}), may be wrong"
+    name = model.rsplit('/', 1)[-1].removeprefix('whisper-').removesuffix('-mlx')
+    return f"machine-transcribed by Whisper ({name}), may be wrong"
 
 
 # ---------------------------------------------------------------- which songs

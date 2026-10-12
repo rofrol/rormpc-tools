@@ -42,7 +42,7 @@ import argparse, importlib.metadata, json, os, pathlib, platform, subprocess, sy
 SAMPLE_RATE = 16000  # Whisper's and Silero's rate
 DEMUCS_RATE = 44100
 WINDOW = 30  # seconds: Whisper detects the language from one 30 s window
-DEFAULT_MODEL = "mlx-community/whisper-large-v3"
+DEFAULT_MODEL = "mlx-community/whisper-large-v3-mlx"
 
 
 def log(msg):

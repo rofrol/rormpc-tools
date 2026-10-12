@@ -155,7 +155,7 @@ base tools. The command checks the environment and says how to install it when i
 | decode | ffmpeg (Homebrew) | ffmpeg (distribution package) |
 | separation | demucs 4.0.1 + torch 2.5.x, CPU (MPS fails, see above) | demucs + torch CPU wheels; CUDA when present |
 | VAD | Silero VAD (the `silero-vad` package, ONNX or torch) | the same |
-| ASR | mlx-whisper, `mlx-community/whisper-large-v3` (about 3 GB) | faster-whisper (CTranslate2) with `large-v3`, CPU int8 or CUDA |
+| ASR | mlx-whisper, `mlx-community/whisper-large-v3-mlx` (about 3 GB) | faster-whisper (CTranslate2) with `large-v3`, CPU int8 or CUDA |
 | models on disk | htdemucs about 80 MB, Whisper large-v3 about 3 GB, Silero 2 MB | the same, Whisper in CTranslate2 format |
 
 The two ASR backends do not decode identically: both get the same fixture songs in tests (offline: a short
@@ -210,7 +210,7 @@ Disagreed:
 - New Omarchy Radio downloads are transcribed automatically; the library's songs without lyrics once, overnight.
 - Vocals are always separated (demucs); there is no fast mode on the mix.
 - A transcript that passed the checks is shown at once (state `shown`), labelled machine-transcribed.
-- Model: Whisper large-v3 (`mlx-community/whisper-large-v3` on macOS), not the measured turbo.
+- Model: Whisper large-v3 (`mlx-community/whisper-large-v3-mlx` on macOS), not the measured turbo.
 - The heavy dependencies live in a script with inline dependencies (PEP 723) run through `uv run --script`.
 - One commercial API is tried on the whole evaluation set as an upper bound (needs the user's API key).
 
