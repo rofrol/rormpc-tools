@@ -38,7 +38,10 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
       Stored as <song>.transcript.json, never as .lrc. Tell todo-rormpc "landed <tag>": rormpc's display of
       transcripts waits on it.
       Slices (coordinator 2026-10-12, by the plan's build order): 1. `transcribe.py`, the inline-dependency backend
-      script, the sidecar and offline tests with a fake backend (worker w213, in progress); 2. the evaluation set
+      script, the sidecar and offline tests with a fake backend (done 2026-10-12: 061e1bd, 34a3fe1, model id fix
+      1f00935; smoke run on a library copy in temporary dirs: the backend installs, demucs + large-v3 ran, language
+      voted en 5/5, the lines read well; a 14.5 min looped YouTube upload took 12 min and was withheld for
+      words_outside_speech and high_word_density, with a repeated chorus loop and "Thank you." at the end); 2. the evaluation set
       and threshold calibration (needs the model downloads and library copies, outside the worker sandbox); 3. the
       radio auto-run and the overnight library batch; 4. the commercial API upper bound (the user's key); 5. Linux
       faster-whisper. rormpc's display and Enter-to-transcribe are rormpc's items.
