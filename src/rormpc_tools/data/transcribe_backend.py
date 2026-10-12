@@ -198,7 +198,9 @@ def cmd_run(a):
 
 
 def cmd_check(_a):
-    import demucs, mlx_whisper, silero_vad, torch, torchaudio  # noqa: F401
+    import importlib
+    for mod in ("demucs", "mlx_whisper", "silero_vad", "torch", "torchaudio"):
+        importlib.import_module(mod)
     return {"ok": True, "versions": versions()}
 
 
