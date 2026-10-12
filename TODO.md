@@ -83,9 +83,16 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
       --tags). Document it in AGENTS.md's release paragraph. Once committed, send its path to todo-herdr
       (herdr-85), who asks the user for one allow rule on that absolute path; later herdr's driver runs release
       recipes itself.
-      Done 2026-10-12: 2486e38; its path sent to todo-herdr, who asks the user for the allow rule.
+      Done 2026-10-12: 2486e38; its path sent to todo-herdr. The user declined an allow rule ("it must work when
+      someone else installs it at their place"); herdr's round (d-r7pimalx, herdr TODO 2be5e916): no allow rule
+      anywhere, releases will run through herdr's driver with the owner's grant. Until then each release needs the
+      user's yes.
 
 ## Proposed
+
+- Register the release argv (`scripts/release.sh X.Y.Z`) in `.herdr/checks.toml` once herdr's driver supports
+  release recipes (herdr TODO 2be5e916, d-r7pimalx), so herdr runs it from a clean checkout of the approved commit
+  and pushes itself. Follow-up of t-ow65p6fa; waits on herdr.
 
 ## Needs a decision
 
