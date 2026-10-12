@@ -60,6 +60,9 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
         Thresholds are named, provisional constants; the label reads "lyrics end early, check timing". Calibration:
         the coordinator counts the flags over the library read-only after the build and expects at most about 5%
         of synced entries; more goes to "Needs a decision" with the numbers.
+        Built 2026-10-12: 31710ca (`musicdb lyrics check [FILE ...] [--dry-run]`, `suspect` in index.json and
+        `status --json`). Counted over the library read-only: 83 of 444 synced flagged (53 ends-early, 30
+        past-end): above 5%, see Needs a decision. The alignment part waits on the transcription.
       - Later, with the transcription: automatic alignment, using Whisper word timestamps on the vocal stem and a
         robust offset fit, refusing when the evidence is weak.
       Decided by the user 2026-10-11 (d-g7ttw73b): the flag now, the alignment with the transcription. rormpc
@@ -83,4 +86,10 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
 ## Proposed
 
 ## Needs a decision
+
+- Which ends-early thresholds should the lyrics timing flag use (t-fb4wapwk, herdr decision in the ledger)?
+  Options: 30% clamped to 45-120 s, 22 of 441 (5.0%) | 25% clamped to 30-90 s, 30 (6.8%) | keep 20% clamped to 25-90 s, 53 (12%) | 35% clamped to 60-150 s, 12 (2.7%)
+  Checked 2026-10-12 with `musicdb lyrics check --dry-run` (index.json unchanged): most of today's 53 are just over
+  the limit (tail 50-60 s against 45-50 s), likely outros of YouTube rips. past-end adds 30 (6.8%) regardless;
+  those run up to 90 s and 18 lines past the file's end and stay flagged.
 
