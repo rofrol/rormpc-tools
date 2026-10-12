@@ -67,11 +67,12 @@ rormpc-tools". Releases (version bump, tag, push) belong to this repository; ror
         robust offset fit, refusing when the evidence is weak.
       Decided by the user 2026-10-11 (d-g7ttw73b): the flag now, the alignment with the transcription. rormpc
       already has the manual nudge keys (5ff3403), which write the song's `[offset:]` tag.
-- [ ] AGENTS.md: this repository has its own coordinator, so replace the paragraph that names todo-rormpc as the [t-qwdp2q7k]
+- [x] AGENTS.md: this repository has its own coordinator, so replace the paragraph that names todo-rormpc as the [t-qwdp2q7k]
       owner, and describe the cross-repository messages and "landed <tag>" (above). Also: `herdr todo run` refuses
       this repository ("the repository has no master commit"; its branch is `main`, herdr report r-12), so describe
       the flow that works here (`herdr worker start --base <main sha>`, `herdr worker verify`, cherry-pick onto
       `main`) until herdr supports `main`.
+      Done 2026-10-12: the AGENTS.md commit after 4d5b907 (docs(agents): ...).
 - [ ] Releases without the auto-mode classifier blocking them (the user's request 2026-10-12: "and so the
       classifier does not block it; ask the herdr coordinator"). `git tag v0.2.54 && git push origin main v0.2.54`
       was refused as "Create Public Surface" until the user approved it (d-gm4tvmnb). todo-herdr's answer
